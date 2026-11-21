@@ -2,7 +2,7 @@
 
 ## Exact imports
 
-Use these exact names (`compass_star`/`sleek_needle`/`chevron` are `north_style=` values on `add_scalebar_and_north`, not standalone imports):
+Use these exact names (`compass_star`/`sleek_needle`/`chevron`/`line_arrow` are `north_style=` values on `add_scalebar_and_north`, not standalone imports):
 
 ```python
 from gis_agent.integrations.plotting.runtime import MapPanel, configure_plotting, export_figure
@@ -63,3 +63,5 @@ finally:
 ## Further details
 
 - Fisher-Jenks, standalone scripts & `AnchoredSizeBar`: [classification & examples](classification-and-examples.md#fisher-jenks).
+
+For Studio figures, apply the current task’s explicit choices first, then the saved cartography preferences, then the defaults above. Pass the selected `north_style` and `scale_style` (`cartographic`, `ticked`, or `double_box`) to `add_scalebar_and_north`.

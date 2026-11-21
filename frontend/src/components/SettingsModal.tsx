@@ -1,78 +1,109 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, KeyRound, X } from "lucide-react";
 import { api } from "../api/client";
 import { useStudioStore } from "../store/useStudioStore";
 
+import type { EnvInfo, StudioPreferences } from "../types/studio";
+import { PreferenceQuestions, initialPreferences } from "./PreferenceQuestions";
+
 export function SettingsModal() {
-  const { settingsOpen, setSettingsOpen, env, refreshWorkspace, setToast, isTauri } = useStudioStore();
-  const [provider, setProvider] = useState("deepseek");
-  const [model, setModel] = useState("deepseek-flash");
-  const [baseUrl, setBaseUrl] = useState("https://api.deepseek.com");
-  const [apiKey, setApiKey] = useState("");
-  const [qgisDir, setQgisDir] = useState("");
-  const [saving, setSaving] = useState(false);
+  const { settingsOpen, env } = useStudioStore();
+  return settingsOpen && env ? <SettingsForm initialEnv={env} /> : null;
+}
 
+function SettingsForm({ initialEnv: env }: { initialEnv: EnvInfo }) {
+  const { setSettingsOpen, refreshWorkspace, setToast, isTauri, setBasemap, setExecutionPolicy } = useStudioStore();
+  const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
-    if (env && settingsOpen) {
-      setProvider(env.credentials.provider || "deepseek");
-      setModel(env.credentials.model || "deepseek-flash");
-      setBaseUrl(env.credentials.base_url || "https://api.deepseek.com");
-      setQgisDir(env.qgis_dir || "");
-      setApiKey("");
-    }
-  }, [env, settingsOpen]);
-
-  if (!settingsOpen) return null;
+    const element = dialog.current;
+    element?.showModal();
+    return () => element?.close();
+  }, []);
+  const firstVisit = !env.preferences;
+  const [step, setStep] = useState(0);
+  const [preferences, setPreferences] = useState<StudioPreferences>(env.preferences ?? initialPreferences);
+  const [provider, setProvider] = useState(env.credentials.provider);
+  const [model, setModel] = useState(env.credentials.model);
+  const [baseUrl, setBaseUrl] = useState(env.credentials.base_url);
+  const [apiKey, setApiKey] = useState("");
+  const [qgisDir, setQgisDir] = useState(env.qgis_dir ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const sameCredential = provider === env.credentials.provider && baseUrl.trim() === env.credentials.base_url && env.credentials.configured;
+  const titles = ["连接 AI 模型", "选择地图样式", "设置工作习惯"];
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (step < 2) {
+      setStep(step + 1);
+      return;
+    }
+    setError("");
     setSaving(true);
     try {
-      await api.saveCredentials({
-        provider,
-        model,
-        base_url: baseUrl,
-        ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
-      });
-      await api.saveQgis(qgisDir.trim() || null);
+      if (apiKey.trim() || provider !== env.credentials.provider || model !== env.credentials.model || baseUrl !== env.credentials.base_url) {
+        await api.saveCredentials({
+          provider,
+          model,
+          base_url: baseUrl,
+          ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+        });
+      }
+      if (qgisDir.trim() !== (env.qgis_dir ?? "")) await api.saveQgis(qgisDir.trim() || null);
+      await api.savePreferences(preferences);
+      setBasemap(preferences.basemap);
+      setExecutionPolicy(preferences.execution_policy);
       await refreshWorkspace();
-      setToast("模型凭据与环境配置已更新");
+      setToast("已保存工作台偏好");
       setSettingsOpen(false);
-    } catch (err: any) {
-      setToast(err?.message || "保存设置失败");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存失败，请重试");
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-      <form onSubmit={handleSave} className="bg-white rounded-xl shadow-2xl w-full max-w-lg border border-slate-200 overflow-hidden">
+    <dialog ref={dialog} aria-labelledby="setup-title" onCancel={e => {
+      e.preventDefault();
+      if (!saving) setSettingsOpen(false);
+    }} className="m-auto w-[min(36rem,94vw)] bg-transparent backdrop:bg-black/50">
+      <form onSubmit={handleSave} className="bg-white rounded-xl shadow-2xl w-full max-w-xl border border-slate-200 max-h-[92dvh] overflow-y-auto">
         <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
           <div className="flex items-center gap-2 font-semibold text-sm text-slate-800">
             <KeyRound className="w-4 h-4 text-sky-600" />
-            <span>模型凭据与运行环境设置</span>
+            <span>{firstVisit ? "欢迎使用 OpenGIS Studio" : "工作台设置"}</span>
           </div>
-          <button type="button" onClick={() => setSettingsOpen(false)} className="text-slate-400 hover:text-slate-700 cursor-pointer">
+          <button type="button" disabled={saving} aria-label="关闭设置" onClick={() => setSettingsOpen(false)} className="text-slate-400 hover:text-slate-700 cursor-pointer">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="p-4 space-y-3.5 text-sm">
+        <div className="px-5 pt-4">
+          <div className="flex gap-1" aria-hidden="true">{titles.map((t, i) => <span key={t} className={`h-1 flex-1 rounded-full ${i <= step ? "bg-sky-600" : "bg-slate-200"}`} />)}</div>
+          <p className="mt-4 text-xs text-slate-500">第 {step + 1} 步，共 3 步</p>
+          <h2 id="setup-title" className="mt-1 text-xl font-semibold">{titles[step]}</h2>
+        </div>
+        {step === 0 ? <div className="p-5 space-y-3.5 text-sm">
+          <p className="text-xs text-slate-600">使用 GPT 时请选择 OpenAI。也可以先体验地图，稍后在设置中填写密钥。</p>
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">服务商</label>
               <select
-                value={provider}
+                aria-label="服务商" value={provider}
                 onChange={(e) => {
                   const p = e.target.value;
                   setProvider(p);
+                  setApiKey("");
                   if (p === "deepseek") {
                     setBaseUrl("https://api.deepseek.com");
                     setModel("deepseek-flash");
                   } else if (p === "openai") {
                     setBaseUrl("https://api.openai.com/v1");
                     setModel("gpt-4.1");
+                  } else {
+                    setModel("");
+                    setBaseUrl("");
                   }
                 }}
                 className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-xs"
@@ -85,7 +116,7 @@ export function SettingsModal() {
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">模型 ID</label>
               <input
-                value={model}
+                required aria-label="模型 ID" value={model}
                 onChange={(e) => setModel(e.target.value)}
                 className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
               />
@@ -95,7 +126,7 @@ export function SettingsModal() {
           <div>
             <label className="block text-xs font-medium text-slate-600 mb-1">API Base URL</label>
             <input
-              value={baseUrl}
+              type="url" required aria-label="API Base URL" value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
             />
@@ -103,8 +134,8 @@ export function SettingsModal() {
 
           <div>
             <div className="flex items-center justify-between mb-1">
-              <label className="text-xs font-medium text-slate-600">API Key（加密保存至系统凭据库）</label>
-              {env?.credentials.configured && (
+              <label className="text-xs font-medium text-slate-600">API Key</label>
+              {sameCredential && (
                 <span className="text-[11px] text-emerald-600 flex items-center gap-1">
                   <CheckCircle2 className="w-3 h-3" />
                   已配置 ({env.credentials.source})
@@ -112,15 +143,16 @@ export function SettingsModal() {
               )}
             </div>
             <input
-              type="password"
+              aria-label="API Key" type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={env?.credentials.configured ? "留空保持现有密钥不变，输入则覆盖保存" : "sk-..."}
+              placeholder={sameCredential ? "留空保持现有密钥不变，输入则覆盖保存" : "sk-..."}
               className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
             />
           </div>
 
-          <div className="pt-2 border-t border-slate-100">
+          <details className="pt-2 border-t border-slate-100">
+            <summary className="cursor-pointer text-xs text-slate-500 mb-2">QGIS 与运行环境（可选）</summary>
             <div className="flex items-center justify-between mb-1">
               <label className="text-xs font-medium text-slate-600">桌面 QGIS 安装路径（可选增强，不装也可使用开源空间栈）</label>
               {isTauri && (
@@ -156,28 +188,29 @@ export function SettingsModal() {
                 ))}
               </div>
             )}
-          </div>
 
           {env?.python && (
             <div className="text-[11px] text-slate-500 bg-slate-50 rounded p-2 font-mono truncate" title={env.python.executable}>
               Python {env.python.version} · {Object.keys(env.python.packages || {}).length} 空间核心库已就绪
             </div>
           )}
-        </div>
+          </details>
+        </div> : <PreferenceQuestions step={step} value={preferences} onChange={setPreferences} />}
+        {error && <p role="alert" className="px-5 pb-3 text-sm text-red-700">{error}</p>}
 
         <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200 flex justify-end gap-2">
-          <button type="button" onClick={() => setSettingsOpen(false)} className="px-3 py-1.5 text-xs rounded border border-slate-300">
-            关闭
+          <button type="button" disabled={saving} onClick={() => step ? setStep(step - 1) : setSettingsOpen(false)} className="px-3 py-1.5 text-xs rounded border border-slate-300">
+            {step ? "上一步" : "稍后设置"}
           </button>
           <button
             type="submit"
             disabled={saving}
             className="px-3.5 py-1.5 text-xs rounded bg-sky-600 hover:bg-sky-500 text-white font-medium disabled:opacity-50 cursor-pointer"
           >
-            {saving ? "保存中..." : "保存设置"}
+            {saving ? "正在保存…" : step < 2 ? "下一步" : firstVisit ? "保存并进入工作台" : "保存设置"}
           </button>
         </div>
       </form>
-    </div>
+    </dialog>
   );
 }

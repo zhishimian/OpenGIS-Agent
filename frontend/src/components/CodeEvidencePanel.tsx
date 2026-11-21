@@ -11,19 +11,34 @@ export function CodeEvidencePanel() {
   const [logText, setLogText] = useState("");
 
   useEffect(() => {
+    let active = true;
+    setScriptText("");
+    setLogText("");
     if (!activeSessionId || !selectedExecId) return;
+    const readSection = async (section: "script" | "stderr") => {
+      const parts: string[] = [];
+      let cursor: number | null = 0;
+      while (active && cursor !== null) {
+        const page = await api.getExecutions(activeSessionId, selectedExecId, section, cursor);
+        if (!page.ok) return section === "script" ? (page.error || "无法读取脚本") : (executions.find((row) => row.execution_id === selectedExecId)?.error || "");
+        parts.push(page.text || "");
+        cursor = page.next_cursor ?? null;
+      }
+      return parts.join("");
+    };
     void (async () => {
       try {
         const [scr, errLog] = await Promise.all([
-          api.getExecutions(activeSessionId, selectedExecId, "script"),
-          api.getExecutions(activeSessionId, selectedExecId, "stderr"),
+          readSection("script"), readSection("stderr"),
         ]);
-        setScriptText(scr.text || "(无脚本快照)");
-        setLogText(errLog.text || "");
+        if (!active) return;
+        setScriptText(scr || "(无脚本快照)");
+        setLogText(errLog);
       } catch {
-        setScriptText("(读取执行详情失败)");
+        if (active) setScriptText("(读取执行详情失败)");
       }
     })();
+    return () => { active = false; };
   }, [activeSessionId, selectedExecId]);
 
   const scriptExecs = executions.filter((e) => e.tool === "run_python_script" || e.script_snapshot);
@@ -36,7 +51,7 @@ export function CodeEvidencePanel() {
           {scriptExecs.length === 0 ? (
             <div className="p-4 text-xs text-slate-400">暂无 Python 脚本执行记录</div>
           ) : (
-            scriptExecs.map((row) => (
+            scriptExecs.map((row, index) => (
               <button
                 key={row.execution_id}
                 onClick={() => setSelectedExecId(row.execution_id)}
@@ -44,9 +59,9 @@ export function CodeEvidencePanel() {
                   selectedExecId === row.execution_id ? "bg-sky-50 border-l-2 border-sky-600" : ""
                 }`}
               >
-                <div className="flex items-center justify-between font-mono">
-                  <span className="font-medium text-slate-800">{row.execution_id}</span>
-                  <span className={row.status === "succeeded" ? "text-emerald-600" : "text-rose-600"}>{row.status}</span>
+                <div className="flex flex-wrap items-center justify-between gap-1">
+                  <span className="font-medium text-slate-800 truncate" title={row.execution_id}>{row.script?.split(/[\\/]/).pop() || `脚本执行 ${index + 1}`}</span>
+                  <span className={row.status === "succeeded" ? "text-emerald-600" : "text-rose-600"}>{row.status === "succeeded" ? "完成" : row.status === "failed" ? "失败" : row.status}</span>
                 </div>
                 <div className="text-[11px] text-slate-400 mt-0.5">{((row.elapsed_ms || 0) / 1000).toFixed(2)}s</div>
               </button>
@@ -104,7 +119,7 @@ export function CodeEvidencePanel() {
             </button>
           )}
         </div>
-        <pre className="flex-1 overflow-auto p-3 text-xs font-mono bg-slate-900 text-slate-100 leading-relaxed">{scriptText}</pre>
+        <pre className={selectedExecId ? "flex-1 overflow-auto p-3 text-xs font-mono bg-slate-900 text-slate-100 leading-relaxed" : "flex-1 bg-slate-50"}>{scriptText}</pre>
         {logText && (
           <div className="h-36 border-t border-slate-300 bg-slate-950 text-amber-200 p-2.5 overflow-auto text-[11px] font-mono">
             <div className="text-slate-400 mb-1">stderr 日志：</div>

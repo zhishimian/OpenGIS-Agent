@@ -1,5 +1,6 @@
 import type {
   EnvInfo,
+  StudioPreferences,
   ExecutionRow,
   FigureItem,
   IdentifyResult,
@@ -106,6 +107,8 @@ export const api = {
         ...(dir ? { dir } : {}),
       }).toString()}`
     ),
+  savePreferences: (preferences: StudioPreferences) =>
+    apiFetch<StudioPreferences>("/api/settings/preferences", { method: "PUT", body: JSON.stringify(preferences) }),
   saveCredentials: (payload: { api_key?: string; provider?: string; model?: string; base_url?: string }) =>
     apiFetch("/api/settings/credentials", { method: "POST", body: JSON.stringify(payload) }),
   saveQgis: (qgis_dir: string | null) =>
@@ -170,10 +173,10 @@ export const api = {
     ),
   listFigures: (sessionId: string) =>
     apiFetch<{ session_id: string; figures: FigureItem[] }>(`/api/figures/${encodeURIComponent(sessionId)}`),
-  getExecutions: (sessionId: string, executionId?: string, section = "summary") =>
-    apiFetch<{ ok: boolean; items?: ExecutionRow[]; text?: string }>(
+  getExecutions: (sessionId: string, executionId?: string, section = "summary", cursor = 0) =>
+    apiFetch<{ ok: boolean; items?: ExecutionRow[]; text?: string; error?: string; next_cursor?: number | null }>(
       `/api/executions/${encodeURIComponent(sessionId)}?${new URLSearchParams({
-        ...(executionId ? { execution_id: executionId, section } : {}),
+        ...(executionId ? { execution_id: executionId, section, cursor: String(cursor) } : {}),
       }).toString()}`
     ),
   revealOrOpen: async (path: string, action: "reveal" | "open" = "reveal") => {

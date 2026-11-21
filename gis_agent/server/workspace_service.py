@@ -9,7 +9,10 @@ import shutil
 import subprocess
 import sys
 from threading import RLock
-from typing import Any
+from typing import Any, Literal
+from tempfile import NamedTemporaryFile
+
+from pydantic import BaseModel
 
 from gis_agent.adapters.credentials import Credentials
 from gis_agent.config import AppConfig, QGISConfig
@@ -26,6 +29,14 @@ SPATIAL_EXTS = {".shp", ".gpkg", ".geojson", ".fgb", ".kml", ".tif", ".tiff", ".
 VECTOR_EXTS = {".shp", ".gpkg", ".geojson", ".fgb", ".kml"}
 RASTER_EXTS = {".tif", ".tiff", ".img", ".vrt", ".asc"}
 FIGURE_EXTS = {".png", ".svg", ".jpg", ".jpeg"}
+
+
+class StudioPreferences(BaseModel):
+    north_style: Literal["compass_star", "sleek_needle", "chevron", "line_arrow"]
+    scale_style: Literal["cartographic", "ticked", "double_box"]
+    basemap: Literal["offline", "positron", "dark", "osm"]
+    execution_policy: Literal["auto", "plan_first", "step_review"]
+    label_language: Literal["随任务", "中文", "英文", "中英双语"]
 
 
 def _user_settings_path() -> Path:
@@ -76,8 +87,18 @@ class WorkspaceService:
                 else:
                     current[key] = value
             self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-            self.settings_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.settings_path.parent, delete=False) as f:
+                json.dump(current, f, ensure_ascii=False, indent=2)
+            Path(f.name).replace(self.settings_path)
             return current
+
+    def preferences(self) -> dict[str, str] | None:
+        return self._read_settings().get("preferences")
+
+    def save_preferences(self, preferences: StudioPreferences) -> dict[str, str]:
+        values = preferences.model_dump()
+        self._write_settings({"preferences": values})
+        return values
 
     def load_config(self) -> AppConfig:
         with self._lock:
@@ -353,6 +374,7 @@ class WorkspaceService:
             "qgis_dir": qgis_path,
             "detected_qgis_dirs": self.detect_qgis_dirs(),
             "credentials": creds,
+            "preferences": self.preferences(),
         }
 
     def reveal_or_open(self, raw_path: str, action: str = "reveal") -> dict[str, Any]:

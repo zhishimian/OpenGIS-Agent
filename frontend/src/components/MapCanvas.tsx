@@ -12,6 +12,8 @@ import {
   Hand,
   Hexagon,
   Layers,
+  Map as MapIcon,
+  ChevronDown,
   Maximize2,
   MousePointerClick,
   Table2,
@@ -21,6 +23,14 @@ import {
 import { api } from "../api/client";
 import { useStudioStore } from "../store/useStudioStore";
 import type { BasemapKind, GeoJsonFeatureCollection, LayerItem } from "../types/studio";
+
+const mapTools = [
+  { id: "pan", icon: Hand, label: "漫游" },
+  { id: "identify", icon: Crosshair, label: "点查" },
+  { id: "bbox", icon: BoxSelect, label: "框选范围" },
+  { id: "polygon", icon: Hexagon, label: "绘制多边形" },
+  { id: "select_fid", icon: MousePointerClick, label: "点选要素" },
+] as const;
 
 function buildStyleSpec(basemap: BasemapKind): maplibregl.StyleSpecification {
   if (basemap === "offline") {
@@ -60,8 +70,9 @@ function rampFillExpression(layer: LayerItem): any {
   return expr;
 }
 
-export function MapCanvas() {
+export function MapCanvas({ onSwitchFolder }: { onSwitchFolder: () => void }) {
   const {
+    env,
     isTauri,
     layers,
     files,
@@ -100,6 +111,8 @@ export function MapCanvas() {
   const [polyVerts, setPolyVerts] = useState<Array<[number, number]>>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
 
+  const [layersCollapsed, setLayersCollapsed] = useState(false);
+
   // Attribute drawer state
   const [attrRows, setAttrRows] = useState<any[]>([]);
   const [attrFields, setAttrFields] = useState<string[]>([]);
@@ -120,8 +133,13 @@ export function MapCanvas() {
     map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "bottom-right");
     map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: "metric" }), "bottom-left");
     mapRef.current = map;
+    const observer = new ResizeObserver(() => {
+      if (map.getContainer().clientWidth > 0) map.resize();
+    });
+    observer.observe(containerRef.current);
 
     return () => {
+      observer.disconnect();
       map.remove();
       mapRef.current = null;
     };
@@ -438,25 +456,40 @@ export function MapCanvas() {
 
   const spatialFiles = files.filter((f) => f.is_spatial);
 
+  const openData = async () => {
+    if (!isTauri) {
+      setPickerOpen((open) => !open);
+      return;
+    }
+    try {
+      const paths = await api.pickNativeSpatialFiles();
+      for (const path of paths) await attachAndAddLayer(path);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "无法打开数据文件");
+    }
+  };
+  const showStart = layers.length === 0 && basemap === "offline" && mapTool === "pan" && !pickerOpen;
+
   return (
-    <div className="h-full flex flex-col relative">
+    <div className="map-workspace h-full flex flex-col relative">
       {/* Map Toolbar */}
-      <div className="h-10 bg-white border-b border-slate-200 px-3 flex items-center justify-between gap-2 text-xs shrink-0">
+      <div className="map-tools bg-white border-b border-slate-200 px-3 flex items-center justify-between gap-2 text-xs shrink-0">
         <div className="flex items-center gap-1">
-          {[
-            { id: "pan" as const, icon: Hand, label: "漫游" },
-            { id: "identify" as const, icon: Crosshair, label: "Identify 点查" },
-            { id: "bbox" as const, icon: BoxSelect, label: "框选 AOI" },
-            { id: "polygon" as const, icon: Hexagon, label: "绘制多边形" },
-            { id: "select_fid" as const, icon: MousePointerClick, label: "点选要素" },
-          ].map((t) => {
+          <select className="compact-map-tool" aria-label="地图工具" value={mapTool} onChange={(e) => {
+            const tool = mapTools.find((item) => item.id === e.target.value);
+            if (tool) setMapTool(tool.id);
+          }}>
+            {mapTools.map((tool) => <option key={tool.id} value={tool.id}>{tool.label}</option>)}
+          </select>
+          {mapTools.map((t) => {
             const Icon = t.icon;
             return (
               <button
                 key={t.id}
+                title={t.label} aria-label={t.label} aria-pressed={mapTool === t.id}
                 onClick={() => setMapTool(t.id)}
                 className={`px-2 py-1 rounded flex items-center gap-1 transition cursor-pointer ${
-                  mapTool === t.id ? "bg-sky-600 text-white" : "text-slate-600 hover:bg-slate-100"
+                  mapTool === t.id ? "bg-sky-50 text-sky-800 ring-1 ring-sky-200" : "text-slate-600 hover:bg-slate-100"
                 }`}
               >
                 <Icon className="w-3.5 h-3.5" />
@@ -473,26 +506,19 @@ export function MapCanvas() {
 
         <div className="flex items-center gap-2">
           <select
-            value={basemap}
+            aria-label="底图" value={basemap}
             onChange={(e) => setBasemap(e.target.value as BasemapKind)}
             className="border border-slate-300 rounded px-2 py-1 text-xs bg-white"
           >
-            <option value="offline">离线纯色底图</option>
+            <option value="offline">离线底图</option>
             <option value="positron">浅色 Carto 底图</option>
             <option value="dark">深色 Carto 底图</option>
             <option value="osm">OpenStreetMap</option>
           </select>
 
           <button
-            onClick={async () => {
-              if (isTauri) {
-                const picked = await api.pickNativeSpatialFiles();
-                for (const p of picked) await attachAndAddLayer(p);
-              } else {
-                setPickerOpen((v) => !v);
-              }
-            }}
-            className="px-2.5 py-1 rounded bg-slate-900 text-white hover:bg-slate-800 flex items-center gap-1 cursor-pointer"
+            onClick={openData}
+            className="load-data-button"
           >
             <FolderPlus className="w-3.5 h-3.5" /> 加载数据
           </button>
@@ -500,7 +526,18 @@ export function MapCanvas() {
       </div>
 
       <div className="flex-1 relative min-h-0">
-        <div ref={containerRef} className={`w-full h-full ${mapTool !== "pan" ? "cursor-crosshair" : ""}`} />
+        <div data-north={env?.preferences?.north_style} data-scale={env?.preferences?.scale_style} ref={containerRef} className={`w-full h-full ${mapTool !== "pan" ? "cursor-crosshair" : ""}`} />
+
+        {showStart && (
+          <div className="map-start">
+            <div className="map-start-content">
+              <div className="map-mark"><MapIcon size={36} strokeWidth={1.4}/></div>
+              <h1>加载第一个图层</h1>
+              <p>{isTauri ? "选择空间数据文件，或将文件拖到地图上。" : "从工作目录选择矢量或栅格数据，在地图上查看。"}</p>
+              <button onClick={openData}><FolderPlus size={17}/>{isTauri ? "选择空间数据" : "从工作目录加载"}</button>
+            </div>
+          </div>
+        )}
 
         {/* BBox visual overlay */}
         {bboxRect && (
@@ -516,23 +553,20 @@ export function MapCanvas() {
         )}
 
         {/* Floating Layer Manager */}
-        <div className="absolute top-3 left-3 z-10 w-64 max-h-[70%] bg-white/95 backdrop-blur rounded-xl shadow-lg border border-slate-200 flex flex-col overflow-hidden text-xs">
+        <div className={`absolute top-3 left-3 z-10 ${layers.length && !layersCollapsed ? "w-64" : "w-auto"} max-h-[70%] bg-white/95 backdrop-blur rounded-xl shadow-lg border border-slate-200 flex flex-col overflow-hidden text-xs`}>
           <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between font-semibold text-slate-700">
-            <span className="flex items-center gap-1.5">
-              <Layers className="w-3.5 h-3.5 text-sky-600" /> 图层 ({layers.length})
-            </span>
-            {spatialFiles.length > 0 && (
+            <button disabled={!layers.length} aria-expanded={layers.length > 0 && !layersCollapsed} onClick={() => setLayersCollapsed(!layersCollapsed)} className="flex items-center gap-1.5">
+              <Layers className="w-3.5 h-3.5 text-sky-600" /> 图层 {layers.length} {layers.length > 0 && <ChevronDown size={13} className={layersCollapsed ? "-rotate-90" : ""}/>}
+            </button>
+            {layers.length > 0 && !layersCollapsed && spatialFiles.length > 0 && (
               <button onClick={() => setPickerOpen((v) => !v)} className="text-[11px] font-normal text-sky-600 hover:underline cursor-pointer">
                 工作区数据 ({spatialFiles.length})
               </button>
             )}
           </div>
 
-          <div className="overflow-y-auto p-2 space-y-2">
-            {layers.length === 0 ? (
-              <div className="text-[11px] text-slate-400 p-2 text-center">暂无加载图层，点击右上「加载数据」或让 Agent 运行分析</div>
-            ) : (
-              layers.map((lyr, idx) => (
+          {layers.length > 0 && !layersCollapsed && <div className="overflow-y-auto p-2 space-y-2">
+            {layers.map((lyr, idx) => (
                 <div key={lyr.id} className="p-2 rounded-lg border border-slate-200 bg-white space-y-1.5">
                   <div className="flex items-center justify-between gap-1">
                     <button onClick={() => toggleLayerVisible(lyr.id)} className="flex items-center gap-1.5 min-w-0 font-medium text-slate-800 cursor-pointer">
@@ -630,18 +664,21 @@ export function MapCanvas() {
                     </div>
                   )}
                 </div>
-              ))
-            )}
-          </div>
+              ))}
+          </div>}
         </div>
 
         {/* Workspace quick file picker dropdown */}
         {pickerOpen && (
-          <div className="absolute top-3 right-3 z-20 w-72 bg-white rounded-xl shadow-xl border border-slate-200 p-3 text-xs space-y-2 max-h-72 overflow-y-auto">
+          <div className="absolute top-3 right-3 z-20 w-72 max-w-[calc(100%-1.5rem)] bg-white rounded-xl shadow-xl border border-slate-200 p-3 text-xs space-y-2 max-h-72 overflow-y-auto">
             <div className="flex items-center justify-between font-semibold">
               <span>从当前目录加载</span>
               <button onClick={() => setPickerOpen(false)} className="cursor-pointer"><X className="w-3.5 h-3.5" /></button>
             </div>
+            {spatialFiles.length === 0 && <div className="space-y-3 p-2">
+              <p className="text-sm text-slate-600">当前目录没有可加载的空间数据。</p>
+              <button className="text-sky-700 font-medium" onClick={() => { setPickerOpen(false); onSwitchFolder(); }}>切换工作目录</button>
+            </div>}
             {spatialFiles.map((f) => (
               <button
                 key={f.path}
@@ -661,7 +698,7 @@ export function MapCanvas() {
         {/* Identify Popup */}
         {identifyPopup && (
           <div className="absolute bottom-4 right-4 z-20 w-80 max-h-80 bg-white rounded-xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden text-xs">
-            <div className="px-3 py-2 bg-slate-900 text-white flex items-center justify-between">
+            <div className="px-3 py-2 bg-emerald-50 text-emerald-950 border-b border-emerald-100 flex items-center justify-between">
               <span className="font-mono">
                 Identify ({identifyPopup.lon.toFixed(4)}, {identifyPopup.lat.toFixed(4)})
               </span>

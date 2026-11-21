@@ -16,10 +16,11 @@ import {
 } from "lucide-react";
 import { useStudioStore } from "../store/useStudioStore";
 
-export function ChatPanel() {
+export function ChatPanel({ onOpenResult }: { onOpenResult: (figurePath?: string) => void }) {
   const {
+    executionPolicy, setExecutionPolicy,
     plan,
-    messages,
+    messages, executions,
     toolFeed,
     busy,
     waiting,
@@ -110,18 +111,11 @@ export function ChatPanel() {
       )}
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-3 text-sm">
-        {messages.length === 0 && !busy && (
-          <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-slate-600 text-xs space-y-2">
-            <div className="font-semibold text-slate-800 text-sm">开始空间分析与地图制图</div>
-            <p>你可以把桌面上的 `.shp` / `.gpkg` / `.tif` 拖到右侧画布，点查属性、框选研究区，再让我执行分析并导出可编辑 SVG 成图。</p>
-          </div>
-        )}
-
         {messages.map((msg, idx) => {
           if (msg.role === "user" && msg.origin !== "program") {
             return (
               <div key={idx} className="flex justify-end">
-                <div className="bg-sky-600 text-white rounded-2xl rounded-tr-sm px-3.5 py-2 max-w-[90%] text-xs whitespace-pre-wrap leading-relaxed shadow-sm">
+                <div className="bg-sky-600 text-white rounded-2xl rounded-tr-sm px-3.5 py-2 max-w-[90%] text-sm whitespace-pre-wrap leading-relaxed shadow-sm">
                   {msg.content}
                 </div>
               </div>
@@ -133,7 +127,8 @@ export function ChatPanel() {
             if (calls.length > 0) {
               return (
                 <div key={idx} className="space-y-1">
-                  {calls.map((tc) => {
+                  {calls.map((tc, slot) => {
+                    const execution = executions.find((row) => row.sources?.assistant_index === idx && row.sources.call_slot === slot);
                     const fnName = tc.function?.name || "tool";
                     const toolMsg = messages.find((m, mIdx) => mIdx > idx && m.role === "tool" && m.tool_call_id === tc.id);
                     let parsed: any = null;
@@ -150,15 +145,16 @@ export function ChatPanel() {
                         <div className="flex items-center justify-between gap-2">
                           <span className="font-mono text-slate-700 font-medium">{fnName}</span>
                           <div className="flex items-center gap-1.5">
-                            {fnName === "run_python_script" && toolMsg?.execution_id && (
+                            {fnName === "run_python_script" && execution && (
                               <button
                                 onClick={() => {
-                                  setSelectedExecId(toolMsg.execution_id);
+                                  setSelectedExecId(execution.execution_id);
                                   setActiveTab("code");
+                                  onOpenResult();
                                 }}
                                 className="text-[11px] text-sky-600 hover:underline flex items-center gap-0.5 cursor-pointer"
                               >
-                                <FileCode2 className="w-3 h-3" /> 脚本
+                                <FileCode2 className="w-3 h-3" /> {parsed?.ok === false ? "查看日志" : "查看代码"}
                               </button>
                             )}
                             {parsed && (
@@ -180,10 +176,11 @@ export function ChatPanel() {
                                 <button
                                   key={oIdx}
                                   onClick={() => {
-                                    if (isFig) setActiveTab("figures");
+                                    if (isFig) { setActiveTab("figures"); onOpenResult(p); }
                                     else if (isMap) {
                                       void addLayerByPath(p);
                                       setActiveTab("map");
+                                      onOpenResult();
                                     }
                                   }}
                                   className="text-[11px] px-1.5 py-0.5 rounded bg-white border border-slate-200 text-slate-600 hover:border-sky-400 hover:text-sky-700 truncate max-w-[200px] cursor-pointer"
@@ -204,7 +201,7 @@ export function ChatPanel() {
 
             if (msg.content) {
               return (
-                <div key={idx} className="bg-slate-100 text-slate-800 rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-xs whitespace-pre-wrap leading-relaxed">
+                <div key={idx} className="bg-slate-100 text-slate-800 rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-sm whitespace-pre-wrap leading-relaxed">
                   {msg.content}
                 </div>
               );
@@ -219,12 +216,13 @@ export function ChatPanel() {
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
               <span>Agent 正在思考并执行空间步骤…</span>
             </div>
+            {toolFeed.length > 0 && <details><summary className="cursor-pointer">工具调用（{toolFeed.length}）</summary>
             {toolFeed.map((t) => (
               <div key={t.id} className="flex items-center justify-between text-[11px] text-slate-600 font-mono pl-5">
                 <span>{t.tool}</span>
                 <span>{t.status === "running" ? "执行中" : `${((t.elapsedMs || 0) / 1000).toFixed(1)}s`}</span>
               </div>
-            ))}
+            ))}</details>}
           </div>
         )}
 
@@ -337,6 +335,23 @@ export function ChatPanel() {
         </div>
       )}
 
+      {messages.length === 0 && !busy && !waiting && (
+        <div className="chat-intro">
+          <h2>开始空间分析</h2>
+          <p>描述你的任务，或从工作目录中的数据开始。</p>
+          <button onClick={() => setInput("列出工作目录中的空间数据")}>列出工作目录中的空间数据 ↗</button>
+        </div>
+      )}
+      <label className="policy-select">执行方式
+        <select aria-label="执行方式" value={executionPolicy} onChange={(e) => {
+          const policy = e.target.value;
+          if (policy === "auto" || policy === "plan_first" || policy === "step_review") setExecutionPolicy(policy);
+        }}>
+          <option value="auto" data-help="由助手连续执行分析步骤">自动推进</option>
+          <option value="plan_first" data-help="先确认分析计划，再开始计算">先审计划</option>
+          <option value="step_review" data-help="生成地图后暂停，等待批注">出图精修</option>
+        </select>
+      </label>
       <form onSubmit={handleSend} className="p-2.5 border-t border-slate-200 bg-white flex items-end gap-2 shrink-0">
         <textarea
           rows={2}
@@ -348,8 +363,9 @@ export function ChatPanel() {
               void handleSend();
             }
           }}
-          placeholder={waiting ? "输入对当前检查点的补充指令..." : "描述空间分析或制图任务（Enter 发送，Shift+Enter 换行）"}
-          className="flex-1 resize-none border border-slate-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-sky-500"
+          placeholder={waiting ? "输入对当前检查点的补充指令..." : "描述分析或制图任务…"}
+          aria-label="任务描述"
+          className="min-w-0 flex-1 resize-none border border-slate-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-sky-500"
         />
         {busy ? (
           <button

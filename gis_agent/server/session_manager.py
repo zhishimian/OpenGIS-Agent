@@ -159,6 +159,11 @@ class SessionManager:
             usage = _estimate_usage_from_calls(_calls_path(store))
             items.append({
                 "session_id": sid,
+                "title": next((
+                    msg["content"].strip()[:36] for msg in messages
+                    if msg.get("role") == "user" and msg.get("origin") != "program"
+                    and isinstance(msg.get("content"), str) and msg["content"].strip()
+                ), ""),
                 "busy": rt.busy,
                 "waiting": bool(outcome and outcome.get("status") == "needs_input"),
                 "status": outcome.get("status") if outcome else ("empty" if not messages else "idle"),
@@ -215,13 +220,13 @@ class SessionManager:
             "usage": usage,
         }
 
-    def get_executions(self, session_id: str, execution_id: str | None = None, section: str = "summary") -> dict[str, Any]:
+    def get_executions(self, session_id: str, execution_id: str | None = None, section: str = "summary", cursor: int = 0) -> dict[str, Any]:
         cfg = self.workspace.load_config()
         store = SessionStore(cfg.session_root, session_id)
         output_dir = cfg.output_root / session_id
         history = ExecutionHistory(store, output_dir)
         if execution_id:
-            return history.query(execution_id=execution_id, section=section, max_characters=32000)
+            return history.query(execution_id=execution_id, section=section, cursor=cursor, max_characters=8000)
         return {"ok": True, "items": history.rows()}
 
     def _build_workspace_context(
@@ -229,8 +234,10 @@ class SessionManager:
         raw: dict[str, Any] | None,
         output_dir: Path,
     ) -> WorkspaceContext | None:
-        if not raw:
+        preferences = self.workspace.preferences()
+        if not raw and not preferences:
             return None
+        raw = raw or {}
         drawn_geom = raw.get("drawn_geometry_geojson")
         drawn_bbox = raw.get("drawn_bbox_wgs84")
         if isinstance(drawn_geom, dict):
@@ -254,7 +261,7 @@ class SessionManager:
                 }
 
         clicked = raw.get("clicked_point_wgs84")
-        policy = raw.get("execution_policy", "auto")
+        policy = raw.get("execution_policy", (preferences or {}).get("execution_policy", "auto"))
         if policy not in {"auto", "plan_first", "step_review"}:
             policy = "auto"
 
@@ -269,6 +276,7 @@ class SessionManager:
             drawn_geometry_geojson=drawn_geom if isinstance(drawn_geom, dict) else None,
             figure_annotations=tuple(dict(a) for a in (raw.get("figure_annotations") or ()) if isinstance(a, dict)),
             execution_policy=policy,
+            cartography_preferences={k: v for k, v in (preferences or {}).items() if k in {"north_style", "scale_style", "label_language"}},
         )
 
     def _run_turn_async(

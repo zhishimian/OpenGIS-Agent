@@ -24,7 +24,7 @@ import uvicorn
 from gis_agent.server.figure_service import FigureService
 from gis_agent.server.session_manager import SessionManager
 from gis_agent.server.spatial_service import SpatialService
-from gis_agent.server.workspace_service import WorkspaceService
+from gis_agent.server.workspace_service import StudioPreferences, WorkspaceService
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -206,6 +206,10 @@ def create_app(
     @app.get("/api/workspace/files")
     def list_workspace_files(dir: str | None = None, session_id: str | None = None) -> dict[str, Any]:
         return _guard_http(lambda: workspace.list_files(dir, session_id=session_id))
+
+    @app.put("/api/settings/preferences")
+    def save_preferences(req: StudioPreferences) -> dict[str, str]:
+        return workspace.save_preferences(req)
 
     @app.get("/api/settings/credentials")
     def get_credentials() -> dict[str, Any]:
@@ -437,8 +441,8 @@ def create_app(
         return {"session_id": session_id, "figures": figures.list_figures(output_dir)}
 
     @app.get("/api/executions/{session_id}")
-    def list_executions(session_id: str, execution_id: str | None = None, section: str = "summary") -> dict[str, Any]:
-        return _guard_http(lambda: manager.get_executions(session_id, execution_id=execution_id, section=section))
+    def list_executions(session_id: str, execution_id: str | None = None, section: str = "summary", cursor: int = 0) -> dict[str, Any]:
+        return _guard_http(lambda: manager.get_executions(session_id, execution_id=execution_id, section=section, cursor=cursor))
 
     @app.post("/api/os/reveal")
     def os_reveal(req: RevealReq) -> dict[str, Any]:

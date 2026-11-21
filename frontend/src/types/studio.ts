@@ -40,7 +40,16 @@ export interface UsageStats {
   estimated_cny: number;
 }
 
+export interface StudioPreferences {
+  north_style: "compass_star" | "sleek_needle" | "chevron" | "line_arrow";
+  scale_style: "cartographic" | "ticked" | "double_box";
+  label_language: "随任务" | "中文" | "英文" | "中英双语";
+  basemap: BasemapKind;
+  execution_policy: ExecutionPolicy;
+}
+
 export interface EnvInfo {
+  preferences: StudioPreferences | null;
   project_dir: string;
   has_qgis: boolean;
   qgis_dir: string | null;
@@ -74,6 +83,7 @@ export interface WorkspaceFileItem {
 }
 
 export interface SessionSummary {
+  title?: string;
   session_id: string;
   busy: boolean;
   waiting: boolean;
@@ -179,6 +189,9 @@ export interface IdentifyResult {
 export interface ExecutionRow {
   execution_id: string;
   tool: string;
+  script?: string;
+  error?: string;
+  sources?: { assistant_index?: number; call_slot?: number };
   status: string;
   elapsed_ms?: number;
   script_snapshot?: string;

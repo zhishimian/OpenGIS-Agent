@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, Columns2, ExternalLink, FolderOpen, Highlighter, SplitSquareHorizontal, ZoomIn, ZoomOut } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ExternalLink, FolderOpen, Highlighter, ZoomIn, ZoomOut } from "lucide-react";
 import { api, buildAuthedUrl } from "../api/client";
 import { useStudioStore } from "../store/useStudioStore";
 
-export function FigureWorkbench() {
+export function FigureWorkbench({ selectedPath, onSelect }: { selectedPath?: string; onSelect: (path: string) => void }) {
   const { figures, figureAnnotations, addFigureAnnotation, setToast } = useStudioStore();
-  const [selectedIdx, setSelectedIdx] = useState(0);
-  const [compareIdx, setCompareIdx] = useState(0);
+  const [comparisonPath, setComparisonPath] = useState("");
+  const [inspectOpen, setInspectOpen] = useState(false);
   const [mode, setMode] = useState<"single" | "side" | "swipe">("single");
   const [swipePos, setSwipePos] = useState(50);
   const [zoom, setZoom] = useState(1);
@@ -16,15 +16,16 @@ export function FigureWorkbench() {
   const [noteInput, setNoteInput] = useState("");
   const imgContainerRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (figures.length > 0) {
-      setSelectedIdx(figures.length - 1);
-      setCompareIdx(Math.max(0, figures.length - 2));
-    }
-  }, [figures.length]);
+  const current = figures.find((fig) => selectedPath && (fig.png_path === selectedPath || fig.svg_path === selectedPath)) ?? figures.at(-1);
+  const alternatives = figures.filter((fig) => fig !== current);
+  const prevFig = alternatives.find((fig) => fig.directory + "/" + fig.name === comparisonPath) ?? alternatives.at(-1);
+  const figurePath = current?.png_path || current?.svg_path || "";
 
-  const current = figures[selectedIdx];
-  const prevFig = figures[compareIdx];
+  useEffect(() => {
+    setPendingBox(null);
+    setDragBox(null);
+    setAnnotating(false);
+  }, [figurePath]);
 
   const figureImgUrl = (path: string | null) =>
     path ? buildAuthedUrl("/api/figures/file", { path, _t: figures.length }) : "";
@@ -81,8 +82,8 @@ export function FigureWorkbench() {
   if (figures.length === 0) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs p-6">
-        <p className="text-sm font-medium text-slate-600 mb-1">尚未生成正式专题成图</p>
-        <p>当 Agent 调用 export_figure 导出 PNG 与可编辑 SVG 后，所有迭代版本将自动出现于此供审阅与圈注对比。</p>
+        <p className="text-sm font-medium text-slate-600 mb-1">暂无成图</p>
+        <p>在对话中提交制图任务，生成后可在这里查看版本和添加批注。</p>
       </div>
     );
   }
@@ -100,14 +101,14 @@ export function FigureWorkbench() {
   return (
     <div className="h-full flex flex-col bg-slate-100">
       {/* Toolbar */}
-      <div className="h-10 bg-white border-b border-slate-200 px-3 flex items-center justify-between gap-2 shrink-0 text-xs">
+      <div className="figure-tools bg-white border-b border-slate-200 px-3 flex items-center justify-between gap-2 shrink-0 text-xs">
         <div className="flex items-center gap-1.5 overflow-x-auto">
-          {figures.map((fig, idx) => (
+          {figures.map((fig) => (
             <button
               key={fig.id}
-              onClick={() => setSelectedIdx(idx)}
+              onClick={() => onSelect(fig.png_path || fig.svg_path || "")}
               className={`px-2.5 py-1 rounded font-medium shrink-0 cursor-pointer ${
-                idx === selectedIdx ? "bg-sky-600 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                fig === current ? "bg-sky-600 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"
               }`}
             >
               v{fig.version} · {fig.name}
@@ -115,9 +116,9 @@ export function FigureWorkbench() {
           ))}
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-1.5">
           <button
-            onClick={() => setAnnotating((v) => !v)}
+            onClick={() => { setMode("single"); setAnnotating((v) => !v); }}
             className={`px-2.5 py-1 rounded flex items-center gap-1 border cursor-pointer ${
               annotating ? "bg-rose-600 text-white border-rose-600" : "bg-white border-slate-300 text-slate-700 hover:bg-slate-50"
             }`}
@@ -127,35 +128,34 @@ export function FigureWorkbench() {
           </button>
 
           {figures.length > 1 && (
-            <>
-              <button
-                onClick={() => setMode((m) => (m === "side" ? "single" : "side"))}
-                className={`p-1.5 rounded border cursor-pointer ${mode === "side" ? "bg-sky-100 border-sky-400 text-sky-700" : "border-slate-300"}`}
-                title="并排对比"
-              >
-                <Columns2 className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={() => setMode((m) => (m === "swipe" ? "single" : "swipe"))}
-                className={`p-1.5 rounded border cursor-pointer ${mode === "swipe" ? "bg-sky-100 border-sky-400 text-sky-700" : "border-slate-300"}`}
-                title="卷帘对比"
-              >
-                <SplitSquareHorizontal className="w-3.5 h-3.5" />
-              </button>
-            </>
+            <select aria-label="版本对比" value={mode} onChange={(event) => {
+              const value = event.target.value;
+              if (value === "single" || value === "side" || value === "swipe") {
+                setMode(value);
+                setAnnotating(false);
+                setPendingBox(null);
+              }
+            }}>
+              <option value="single">对比版本</option><option value="side">并排对比</option><option value="swipe">卷帘对比</option>
+            </select>
           )}
 
-          <button onClick={() => setZoom((z) => Math.max(0.5, z - 0.25))} className="p-1.5 rounded border border-slate-300 cursor-pointer">
+          {mode !== "single" && prevFig && <select aria-label="对照版本" value={prevFig.directory + "/" + prevFig.name}
+            onChange={(event) => setComparisonPath(event.target.value)}>
+            {alternatives.map((fig) => <option key={fig.directory + "/" + fig.name} value={fig.directory + "/" + fig.name}>对照 v{fig.version}</option>)}
+          </select>}
+          <button aria-expanded={inspectOpen} onClick={() => setInspectOpen(!inspectOpen)}>图件详情</button>
+          <button aria-label="缩小成图" onClick={() => setZoom((z) => Math.max(0.5, z - 0.25))} className="p-1.5 rounded border border-slate-300 cursor-pointer">
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
           <span className="text-[11px] w-10 text-center">{Math.round(zoom * 100)}%</span>
-          <button onClick={() => setZoom((z) => Math.min(3, z + 0.25))} className="p-1.5 rounded border border-slate-300 cursor-pointer">
+          <button aria-label="放大成图" onClick={() => setZoom((z) => Math.min(3, z + 0.25))} className="p-1.5 rounded border border-slate-300 cursor-pointer">
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
 
-      <div className="flex-1 flex min-h-0">
+      <div className="figure-body flex-1 flex min-h-0">
         {/* Main viewport */}
         <div className="flex-1 overflow-auto p-4 flex items-center justify-center relative">
           {mode === "single" && current && (
@@ -174,7 +174,7 @@ export function FigureWorkbench() {
                 draggable={false}
               />
               {/* Saved red-box annotations */}
-              {figureAnnotations.map((ann) => {
+              {figureAnnotations.filter((ann) => ann.figure_path === figurePath).map((ann) => {
                 const [x0, y0, x1, y1] = ann.norm_bbox;
                 return (
                   <div
@@ -237,7 +237,7 @@ export function FigureWorkbench() {
           {pendingBox && (
             <form
               onSubmit={submitAnnotation}
-              className="absolute bottom-5 left-1/2 -translate-x-1/2 bg-white shadow-2xl border border-slate-200 rounded-xl p-3 w-96 space-y-2 z-20"
+              className="absolute bottom-5 left-1/2 -translate-x-1/2 bg-white shadow-2xl border border-slate-200 rounded-xl p-3 w-96 max-w-[95%] space-y-2 z-20"
             >
               <div className="text-xs font-semibold text-rose-700">添加局部修改批注 [{pendingBox.join(", ")}]</div>
               <input
@@ -260,7 +260,7 @@ export function FigureWorkbench() {
         </div>
 
         {/* Right inspector sidebar */}
-        {current && (
+        {current && inspectOpen && (
           <aside className="w-64 bg-white border-l border-slate-200 p-3 overflow-y-auto space-y-4 text-xs shrink-0">
             <div>
               <h4 className="font-semibold text-slate-800 mb-2">版面卫生 5 项质检</h4>

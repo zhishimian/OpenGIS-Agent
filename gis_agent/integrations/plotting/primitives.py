@@ -948,13 +948,13 @@ def add_scalebar_and_north(
     scale_style: str = "cartographic",
     north_style: str = "compass_star",
 ) -> dict[str, Any]:
-    """自动选择整洁比例尺长度并渲染出版级分段比例尺（cartographic/ticked）与罗盘星指北针（compass_star/sleek_needle/chevron）。"""
+    """自动选择整洁比例尺长度并渲染出版级分段比例尺（cartographic/ticked/double_box）与罗盘星指北针（compass_star/sleek_needle/chevron/line_arrow）。"""
     scale_st = scale_style.strip().lower()
-    if scale_st not in {"cartographic", "ticked"}:
-        raise ValueError(f"不支持的 scale_style '{scale_style}'；可选 'cartographic' 或 'ticked'。")
+    if scale_st not in {"cartographic", "ticked", "double_box"}:
+        raise ValueError(f"不支持的 scale_style '{scale_style}'；可选 'cartographic'、'ticked' 或 'double_box'。")
     north_st = north_style.strip().lower()
-    if north_st not in {"compass_star", "sleek_needle", "chevron"}:
-        raise ValueError(f"不支持的 north_style '{north_style}'；可选 'compass_star'、'sleek_needle' 或 'chevron'。")
+    if north_st not in {"compass_star", "sleek_needle", "chevron", "line_arrow"}:
+        raise ValueError(f"不支持的 north_style '{north_style}'；可选 'compass_star'、'sleek_needle'、'chevron' 或 'line_arrow'。")
 
     tick_pt = _resolve_pt(fontsize, "xtick.labelsize", 10.0)
     north_pt = _snap_even(tick_pt + 2.0, 12)
@@ -1039,7 +1039,7 @@ def add_scalebar_and_north(
         halo = [path_effects.withStroke(linewidth=2.2, foreground="#ffffff", alpha=0.92)]
         scale_parts: list[Any] = []
 
-        if scale_st == "cartographic":
+        if scale_st in {"cartographic", "double_box"}:
             bar_h = 0.0085
             q = frac_len * 0.25
             h2 = frac_len * 0.50
@@ -1048,6 +1048,8 @@ def add_scalebar_and_north(
                 (q, q, "#ffffff"),
                 (h2, h2, color),
             )
+            if scale_st == "double_box":
+                blocks = [(i * q, q, color if i % 2 == 0 else "#ffffff") for i in range(4)]
             for bx, bw, bcol in blocks:
                 seg = Rectangle(
                     (x0 + bx, y0), bw, bar_h,
@@ -1056,6 +1058,14 @@ def add_scalebar_and_north(
                 )
                 ax.add_patch(seg)
                 scale_parts.append(seg)
+                if scale_st == "double_box":
+                    upper = Rectangle(
+                        (x0 + bx, y0 + bar_h / 2), bw, bar_h / 2,
+                        facecolor="#ffffff" if bcol == color else color, edgecolor=color,
+                        linewidth=0.65, transform=ax.transAxes, zorder=12, gid="scalebar",
+                    )
+                    ax.add_patch(upper)
+                    scale_parts.append(upper)
             for frac in (0.0, 0.5, 1.0):
                 rx = x0 + frac * frac_len
                 riser, = ax.plot(
@@ -1169,6 +1179,13 @@ def add_scalebar_and_north(
             ax.add_patch(left_p)
             ax.add_patch(right_p)
             north_artists.extend([left_p, right_p, tail, cross])
+        elif north_st == "line_arrow":
+            shaft, = ax.plot([nx, nx], [ny - r_s, ny + r_n], color=color, linewidth=1.0,
+                             transform=ax.transAxes, zorder=12, gid="north_arrow")
+            head, = ax.plot([nx - sx * 0.6, nx, nx + sx * 0.6],
+                            [ny, ny + r_n, ny], color=color, linewidth=1.0,
+                            transform=ax.transAxes, zorder=12, gid="north_arrow")
+            north_artists.extend([shaft, head])
         else:
             cw = 0.54 * sx
             left_poly = matplotlib.patches.Polygon(

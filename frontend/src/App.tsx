@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { Code2, Image as ImageIcon, Loader2, Map as MapIcon, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Code2, Image as ImageIcon, Loader2, MessagesSquare, Map as MapIcon, X } from "lucide-react";
 import { ChatPanel } from "./components/ChatPanel";
 import { CodeEvidencePanel } from "./components/CodeEvidencePanel";
 import { FigureWorkbench } from "./components/FigureWorkbench";
@@ -10,6 +10,13 @@ import { useStudioStore } from "./store/useStudioStore";
 
 export default function App() {
   const { ready, initError, activeTab, setActiveTab, figures, toast, setToast, bootstrap } = useStudioStore();
+
+  const [figurePath, setFigurePath] = useState<string | undefined>();
+  const [chatWidth, setChatWidth] = useState(360);
+  const resizeChat = (width: number) => setChatWidth(Math.max(280, Math.min(520, width)));
+  const [chatCollapsed, setChatCollapsed] = useState(false);
+  const [mobileChat, setMobileChat] = useState(false);
+  const [folderOpen, setFolderOpen] = useState(false);
 
   useEffect(() => {
     void bootstrap();
@@ -43,57 +50,52 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-slate-100 overflow-hidden">
-      <TopBar />
-
-      <main className="flex-1 flex min-h-0">
-        {/* Left ~32%: HIL Chat & Plan */}
-        <div className="w-[34%] min-w-[320px] max-w-[460px] h-full shrink-0">
-          <ChatPanel />
-        </div>
-
-        {/* Right ~66%: Tri-View Spatial & Figure Workspace */}
-        <section className="flex-1 flex flex-col min-w-0 h-full bg-white">
-          <div className="h-9 border-b border-slate-200 px-3 bg-slate-50 flex items-center gap-1 shrink-0 text-xs">
-            <button
-              onClick={() => setActiveTab("map")}
-              className={`px-3 py-1 rounded-md flex items-center gap-1.5 font-medium transition cursor-pointer ${
-                activeTab === "map" ? "bg-white text-sky-700 shadow-sm border border-slate-200" : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <MapIcon className="w-3.5 h-3.5" /> 空间地图画布
-            </button>
-            <button
-              onClick={() => setActiveTab("figures")}
-              className={`px-3 py-1 rounded-md flex items-center gap-1.5 font-medium transition cursor-pointer ${
-                activeTab === "figures" ? "bg-white text-sky-700 shadow-sm border border-slate-200" : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <ImageIcon className="w-3.5 h-3.5" /> 成图精修与对比
-              {figures.length > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full bg-sky-100 text-sky-700 text-[10px]">{figures.length}</span>
-              )}
-            </button>
-            <button
-              onClick={() => setActiveTab("code")}
-              className={`px-3 py-1 rounded-md flex items-center gap-1.5 font-medium transition cursor-pointer ${
-                activeTab === "code" ? "bg-white text-sky-700 shadow-sm border border-slate-200" : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <Code2 className="w-3.5 h-3.5" /> 代码与证据
-            </button>
+    <div className="studio-shell" style={{ "--chat-width": `min(${chatWidth}px, 52vw)` } as React.CSSProperties} data-mobile-chat={mobileChat} data-collapsed={chatCollapsed}>
+      <TopBar folderOpen={folderOpen} setFolderOpen={setFolderOpen} />
+      <nav className="studio-nav" aria-label="工作区视图">
+        <button className="chat-switch" aria-expanded={!chatCollapsed} onClick={() => setChatCollapsed(!chatCollapsed)}>
+          <MessagesSquare size={16} />{chatCollapsed ? "展开对话" : "分析对话"}
+          <span aria-hidden="true">{chatCollapsed ? "›" : "‹"}</span>
+        </button>
+        <button className="mobile-switch" aria-pressed={mobileChat} onClick={() => setMobileChat(true)}>
+          <MessagesSquare size={16} />对话
+        </button>
+        {([
+          { tab: "map", label: "地图", Icon: MapIcon },
+          { tab: "figures", label: "成图", Icon: ImageIcon },
+          { tab: "code", label: "代码与证据", Icon: Code2 },
+        ] as const).map(({ tab, label, Icon }) => (
+          <button key={tab} data-work-view aria-pressed={activeTab === tab}
+            onClick={() => { setActiveTab(tab); setMobileChat(false); }}>
+            <Icon size={16} />{label}{tab === "figures" && figures.length > 0 && <small>{figures.length}</small>}
+          </button>
+        ))}
+      </nav>
+      <main className="studio-body">
+        <aside className="studio-chat">
+          <ChatPanel onOpenResult={(path) => { setFigurePath(path); setMobileChat(false); }} />
+          <div className="chat-divider" role="separator" tabIndex={0} aria-label="对话栏宽度"
+            aria-orientation="vertical" aria-valuenow={chatWidth} aria-valuemin={280} aria-valuemax={520}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+                event.preventDefault();
+                resizeChat(chatWidth + (event.key === "ArrowLeft" ? -16 : 16));
+              }
+            }}
+            onPointerDown={(event) => event.currentTarget.setPointerCapture(event.pointerId)}
+            onPointerMove={(event) => {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) resizeChat(event.clientX);
+            }}
+          />
+        </aside>
+        <section className="studio-work">
+          <div className={activeTab === "map" ? "h-full" : "hidden"}>
+            <MapCanvas onSwitchFolder={() => setFolderOpen(true)} />
           </div>
-
-          <div className="flex-1 min-h-0 relative">
-            <div className={activeTab === "map" ? "h-full" : "hidden"}>
-              <MapCanvas />
-            </div>
-            {activeTab === "figures" && <FigureWorkbench />}
-            {activeTab === "code" && <CodeEvidencePanel />}
-          </div>
+          {activeTab === "figures" && <FigureWorkbench selectedPath={figurePath} onSelect={setFigurePath} />}
+          {activeTab === "code" && <CodeEvidencePanel />}
         </section>
       </main>
-
       <SettingsModal />
 
       {toast && (

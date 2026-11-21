@@ -242,7 +242,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         env,
         projectDir: env.project_dir,
         sessions: sessRes.sessions,
-        settingsOpen: !env.credentials.configured,
+        settingsOpen: !env.preferences,
+        basemap: env.preferences?.basemap ?? "offline",
+        executionPolicy: env.preferences?.execution_policy ?? "auto",
       });
       await get().selectSession(sid);
       await get().refreshWorkspace();
@@ -282,6 +284,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   selectSession: async (sessionId: string) => {
     const det = await api.getSessionDetail(sessionId);
     set({
+      selectedExecId: sessionId === get().activeSessionId ? get().selectedExecId : null,
       activeSessionId: sessionId,
       busy: Boolean(det.busy),
       plan: det.plan || { goal: "", steps: [] },
