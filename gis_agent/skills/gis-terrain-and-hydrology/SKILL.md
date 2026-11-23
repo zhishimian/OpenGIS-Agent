@@ -10,12 +10,12 @@ Separate engineering terrain from sink-filled hydrological DEMs, match D8 direct
 
 ## Workflow & Guardrails
 
-1. **Surface semantics**: Never mix bare-earth DEM elevation, DSM canopy/roof elevation, and relative object height (`DSM - DEM`), nor derive cut/fill earthwork or hillslope gradients from a hydrologically filled DEM without logging conditioning depth diffs.
-2. **NoData & border cliffs**: Apply validity masks and finite-sentinel exclusions (`nodata`, `-9999`) to every finite-difference slope neighbor and bilinear stencil; bounds-check raster edges before indexing rather than silently clamping out-of-range coordinates.
+1. **Raw vs filled surface isolation**: Never mix bare-earth DEM elevation, DSM canopy/roof elevation, and relative object height (`DSM - DEM`). Restrict sink-filled DEMs (`dem_filled`) strictly to D8 flow direction, accumulation, stream routing, and flood connectivity masks; **ALL** engineering elevations (structure/crest heights, valley profiles, hillslope gradients, and earthwork cut/fill volumes) MUST read the raw unfilled DEM.
+2. **Pre-operator domain & NoData masking**: Mask ocean/background constant `0 m` water bodies, raster NoData, and finite-sentinel exclusions (`-9999`) before TPI, sink-filling, slope stencils, or bilinear interpolation; bounds-check raster edges before indexing rather than silently clamping out-of-range coordinates.
 3. **D8 directional code standards**: Verify the tool's flow direction convention before tracing downstream:
    - **GRASS `r.watershed`**: `1=NE, 2=N, 3=NW, 4=W, 5=SW, 6=S, 7=SE, 8=E` (negative codes mark spillover leaving bounds).
    - **ESRI / TauDEM**: powers of two `1=E, 2=SE, 4=S, 8=SW, 16=W, 32=NW, 64=N, 128=NE`.
-4. **Nested catchments vs partitions**: Single-outlet complete upstream tracing yields overlapping masks (`upper <= lower`); simultaneous multi-seed partitioning stops at intermediate outlets, shrinking downstream basin areas. Account explicitly for self-cell counting and metric cell area (`dx * dy`).
+4. **Pour-point snapping & nested catchments**: When `Snap Pour Point` misplaces an isolated noisy outlet, tune snapping radius or stream-threshold tiers locally rather than dropping snapping globally for un-snapped D8 downstream tracing. Single-outlet complete upstream tracing yields overlapping masks (`upper <= lower`); simultaneous multi-seed partitioning stops at intermediate outlets, shrinking downstream basin areas. Account explicitly for self-cell counting and metric cell area (`dx * dy`).
 5. **Flood volume connectivity**: Compute reservoir/inundation storage only over flood cells hydraulically connected to the water seed (`connected_inundation_volume`), excluding isolated dry depressions behind ridges.
 
 ## References & Runnable Assets

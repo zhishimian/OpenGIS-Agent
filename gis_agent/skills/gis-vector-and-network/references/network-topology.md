@@ -31,3 +31,8 @@ Sources: [QGIS](https://docs.qgis.org/3.44/en/docs/pyqgis_developer_cookbook/net
 [momepy](https://docs.momepy.org/en/stable/api/momepy.gdf_to_nx.html),
 [OSM restrictions](https://wiki.openstreetmap.org/wiki/Relation:restriction),
 [SciPy COO](https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.coo_matrix.html).
+
+## 2D Planar Noding, Terminal Access & Length Weighting
+- **Planar intersection noding**: OSM and raw street centerlines often share coordinates only at explicit nodes while crossing at mid-segment intersections; when task rules assume a flat 2D street graph without grade separation, split crossing lines via `shapely.ops.unary_union` before building graph edges and check `len(largest_cc) / len(nodes)`.
+- **Access filtering & cross-stage consistency**: Demand origins and facility points must snap only to accessible street classes (filtering out `motorway` / restricted expressways unless explicitly required), and ramp classes (`*_link`) must follow identical inclusion/exclusion rules across coupled land-cover and network stages.
+- **Length-weighted edge averages**: Compute network speed, travel-time, and congestion averages on noded topological edges weighted by `length_m`, never by unweighted raw input feature rows.

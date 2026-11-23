@@ -17,7 +17,7 @@ Check `runtime_capabilities["tier_b_available"]` before importing optional stats
 ## Workflow & Guardrails
 
 1. **Metric distance & weights checks**: Project observations to an appropriate metric CRS before bandwidth/Kriging distances; inspect isolated units (`islands`) and explicitly justify row-standardized (`"r"`) vs binary (`"b"`) weights.
-2. **Prevent spatial/selection leakage**: Lock train / tune / untouched evaluation roles before tuning variograms, neighbor counts, or outlier filters. Use spatial/site/time blocks (`spatial_block_folds`) when nearby samples exhibit spatial autocorrelation.
+2. **Prevent spatial/selection leakage & domain mismatch**: Lock train / tune / untouched evaluation roles before tuning variograms, neighbor counts, or outlier filters. Clip or filter held-out validation points to the target study-area extent before computing acceptance RMSE/metrics, and inspect spatially isolated outliers so out-of-domain anomalies do not distort evaluation. Use spatial/site/time blocks (`spatial_block_folds`) when nearby samples exhibit spatial autocorrelation.
 3. **Cost & coverage reporting**: Estimate `M * N` matrix size and `O(N^3)` Kriging factorization cost before global prediction; apply neighbor bounds or tiled evaluation on large grids and report valid prediction coverage alongside RMSE/R2.
 
 ## References & Runnable Assets

@@ -338,11 +338,15 @@ def _compute_cartography_hygiene_diagnostics(
         else [ax for ax in figure.axes if ax.get_visible() and ax.get_gid() not in {"locator_inset", *skip_gids}]
     )
     duplicate_tick_axes: list[str] = []
+    bare_axis_label_axes: list[str] = []
+    bare_coord_label_re = re.compile(r"^(?:easting|northing|x|y|longitude|latitude)\b", re.IGNORECASE)
     for idx, ax in enumerate(tick_axes):
         if not getattr(ax, "axison", True):
             continue
         x_num = 0
         y_num = 0
+        x_any_ticks = 0
+        y_any_ticks = 0
         off_x = ""
         off_y = ""
         if ax.xaxis.get_visible():
@@ -350,21 +354,25 @@ def _compute_cartography_hygiene_diagnostics(
                 off_x = ax.xaxis.get_major_formatter().get_offset().strip()
             except Exception:
                 off_x = ""
-            x_num = sum(
-                1 for lbl in ax.get_xticklabels()
-                if id(lbl) not in inactive_ids and lbl.get_visible()
-                and re.fullmatch(r"-?\d+(?:\.\d+)?", lbl.get_text().strip())
-            )
+            x_visible = [
+                lbl.get_text().strip()
+                for lbl in ax.get_xticklabels()
+                if id(lbl) not in inactive_ids and lbl.get_visible() and lbl.get_text().strip()
+            ]
+            x_any_ticks = len(x_visible)
+            x_num = sum(1 for txt in x_visible if re.fullmatch(r"-?\d+(?:\.\d+)?", txt))
         if ax.yaxis.get_visible():
             try:
                 off_y = ax.yaxis.get_major_formatter().get_offset().strip()
             except Exception:
                 off_y = ""
-            y_num = sum(
-                1 for lbl in ax.get_yticklabels()
-                if id(lbl) not in inactive_ids and lbl.get_visible()
-                and re.fullmatch(r"-?\d+(?:\.\d+)?", lbl.get_text().strip())
-            )
+            y_visible = [
+                lbl.get_text().strip()
+                for lbl in ax.get_yticklabels()
+                if id(lbl) not in inactive_ids and lbl.get_visible() and lbl.get_text().strip()
+            ]
+            y_any_ticks = len(y_visible)
+            y_num = sum(1 for txt in y_visible if re.fullmatch(r"-?\d+(?:\.\d+)?", txt))
         has_numeric = bool(off_x or off_y or x_num >= 2 or y_num >= 2)
         has_deg = any(
             t.get_visible() and re.search(r"°\s*[EWNS]", t.get_text())
@@ -372,6 +380,13 @@ def _compute_cartography_hygiene_diagnostics(
         )
         if has_numeric and has_deg:
             duplicate_tick_axes.append(str(ax.get_gid() or f"axes_{idx}"))
+        xlabel = ax.get_xlabel().strip() if ax.xaxis.get_visible() else ""
+        ylabel = ax.get_ylabel().strip() if ax.yaxis.get_visible() else ""
+        if not has_deg and (
+            (xlabel and bare_coord_label_re.match(xlabel) and x_any_ticks == 0)
+            or (ylabel and bare_coord_label_re.match(ylabel) and y_any_ticks == 0)
+        ):
+            bare_axis_label_axes.append(str(ax.get_gid() or f"axes_{idx}"))
 
     # 4. 画布边界出界文字/图例裁切检测 与 主图内边框溢界检测
     clipped_texts: list[str] = []
@@ -498,6 +513,8 @@ def _compute_cartography_hygiene_diagnostics(
         "boxed_annotations": boxed_annotations[:10],
         "duplicate_axis_ticks_warning": bool(duplicate_tick_axes),
         "duplicate_tick_axes": duplicate_tick_axes[:5],
+        "bare_axis_label_warning": bool(bare_axis_label_axes),
+        "bare_axis_label_axes": bare_axis_label_axes[:5],
         "clipped_text_warning": bool(clipped_texts),
         "clipped_texts": clipped_texts,
         "frame_overflow_warning": bool(frame_overflow_texts),

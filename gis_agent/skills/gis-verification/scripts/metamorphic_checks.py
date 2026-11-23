@@ -104,6 +104,37 @@ def check_scale_invariance(
     }
 
 
+def check_reclass_lookup(
+    valid_mask: np.ndarray,
+    result: np.ndarray,
+    expected_values: list[float] | None = None,
+    *,
+    atol: float = 1e-6,
+) -> dict[str, Any]:
+    """Verify zero unexpected NaN growth in passable valid cells and log hits per expected tier."""
+    mask = np.asarray(valid_mask, dtype=bool)
+    arr = np.asarray(result, dtype=float)
+    valid_count = int(mask.sum())
+    nan_in_valid = int(np.isnan(arr[mask]).sum()) if valid_count else 0
+    hit_counts: dict[str, int] = {}
+    missing_expected: list[float] = []
+    if expected_values is not None:
+        valid_vals = arr[mask & np.isfinite(arr)]
+        for val in expected_values:
+            hits = int(np.isclose(valid_vals, float(val), atol=atol, rtol=0.0).sum())
+            hit_counts[str(val)] = hits
+            if hits == 0:
+                missing_expected.append(float(val))
+    return {
+        "valid_count": valid_count,
+        "nan_in_valid_count": nan_in_valid,
+        "nan_delta_ok": bool(nan_in_valid == 0),
+        "hit_counts": hit_counts,
+        "missing_expected": missing_expected,
+        "passed": bool(nan_in_valid == 0 and not missing_expected),
+    }
+
+
 def run_demo() -> dict[str, Any]:
     conservation_ok = check_conservation(1000.0, 925.0, unmatched_total=75.0)
     conservation_leak = check_conservation(1000.0, 925.0, unmatched_total=0.0)
@@ -132,6 +163,8 @@ def run_demo() -> dict[str, Any]:
 
     ndvi_scale = check_scale_invariance(lambda nir, red: (nir - red) / (nir + red), 0.4, 0.2)
     savi_scale = check_scale_invariance(lambda nir, red: 1.5 * (nir - red) / (nir + red + 0.5), 0.4, 0.2)
+    reclass_ok = check_reclass_lookup(np.array([[True, True], [True, False]]), np.array([[1.5, 2.0], [1.5, np.nan]]), [1.5, 2.0])
+    reclass_bad = check_reclass_lookup(np.array([[True, True], [True, False]]), np.array([[np.nan, 1.5], [1.5, np.nan]]), [1.5, 2.0])
 
     return {
         "ok": True,
@@ -142,6 +175,8 @@ def run_demo() -> dict[str, Any]:
         "boundary": boundary,
         "ndvi_scale_invariant": ndvi_scale["scale_invariant"],
         "savi_scale_invariant": savi_scale["scale_invariant"],
+        "reclass_ok_passed": reclass_ok["passed"],
+        "reclass_bad_passed": reclass_bad["passed"],
     }
 
 
