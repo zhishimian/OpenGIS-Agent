@@ -17,6 +17,7 @@ from gis_agent.application import open_conversation
 from gis_agent.config import AppConfig
 from gis_agent.core.events import AgentEvent
 from gis_agent.core.planning import Plan
+from gis_agent.persistence.evidence import tool_result
 from gis_agent.persistence.executions import ExecutionHistory
 from gis_agent.persistence.interaction import latest_outcome
 from gis_agent.persistence.sessions import SessionStore, folder_sessions
@@ -28,6 +29,92 @@ AOI_INLINE_LIMIT_BYTES = 2048
 
 def _calls_path(store: SessionStore) -> Path:
     return store.root / f"{store.session_id}.calls.jsonl"
+
+
+def _norm_layer_key(raw: str) -> str:
+    if not raw or not isinstance(raw, str):
+        return ""
+    raw_path, sep, layer_part = raw.partition("|layername=")
+    norm = os.path.normcase(str(Path(raw_path).expanduser().resolve()))
+    if sep:
+        return f"{norm}|layername={layer_part.split('|', 1)[0]}"
+    return norm
+
+
+def _collect_finish_result_paths(store: SessionStore, messages: list[dict[str, Any]]) -> tuple[set[str], list[str]]:
+    """Return (normalized result keys, raw result paths in declaration order) from accepted finish_task calls."""
+    call_artifacts: dict[str, list[str]] = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or ():
+            fn = tc.get("function") or {}
+            if fn.get("name") != "finish_task":
+                continue
+            call_id = str(tc.get("id") or "")
+            raw_args = fn.get("arguments")
+            parsed_args: dict[str, Any] = {}
+            if isinstance(raw_args, str):
+                try:
+                    parsed_args = json.loads(raw_args)
+                except Exception:
+                    parsed_args = {}
+            elif isinstance(raw_args, dict):
+                parsed_args = raw_args
+            arts = [str(p) for p in (parsed_args.get("artifacts") or []) if isinstance(p, str)]
+            if call_id:
+                call_artifacts[call_id] = arts
+
+    result_keys: set[str] = set()
+    ordered_paths: list[str] = []
+    seen_keys: set[str] = set()
+    for msg in messages:
+        if msg.get("role") != "tool":
+            continue
+        cid = str(msg.get("tool_call_id") or "")
+        if cid not in call_artifacts:
+            continue
+        try:
+            res = tool_result(store, msg)
+        except Exception:
+            try:
+                res = json.loads(str(msg.get("content") or "{}"))
+            except Exception:
+                res = {}
+        if not isinstance(res, dict) or res.get("ok") is not True:
+            continue
+        paths = [str(p) for p in (res.get("artifacts") or call_artifacts[cid]) if isinstance(p, str)]
+        for p in paths:
+            key = _norm_layer_key(p)
+            if key and key not in seen_keys:
+                seen_keys.add(key)
+                result_keys.add(key)
+                ordered_paths.append(p)
+    return result_keys, ordered_paths
+
+
+def _extract_row_output_paths(row: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    candidates = [
+        row.get("outputs"),
+        (row.get("result") or {}).get("outputs") if isinstance(row.get("result"), dict) else None,
+        (row.get("links") or {}).get("outputs") if isinstance(row.get("links"), dict) else None,
+        (row.get("facts") or {}).get("outputs") if isinstance(row.get("facts"), dict) else None,
+    ]
+    for container in candidates:
+        if isinstance(container, list):
+            for item in container:
+                if isinstance(item, dict):
+                    p = item.get("path") or item.get("source")
+                    if isinstance(p, str):
+                        paths.append(p)
+                elif isinstance(item, str):
+                    paths.append(item)
+        elif isinstance(container, dict):
+            for val in container.values():
+                if isinstance(val, str):
+                    paths.append(val)
+    return paths
 
 
 def _read_record_safe(store: SessionStore) -> list[dict[str, Any]]:
@@ -196,16 +283,36 @@ class SessionManager:
         usage = _estimate_usage_from_calls(_calls_path(store))
         figures = self.figures.list_figures(output_dir)
 
+        result_keys, result_paths = _collect_finish_result_paths(store, messages)
         discovered_layers: list[dict[str, Any]] = []
-        seen_paths: set[str] = set()
+        seen_keys: set[str] = set()
         for row in history_rows:
-            for out in row.get("outputs") or []:
-                p = out.get("path") if isinstance(out, dict) else None
-                if isinstance(p, str) and p not in seen_paths and Path(p).exists():
-                    kind = self.workspace._classify_path(Path(p))
+            for p in _extract_row_output_paths(row):
+                clean_file = p.split("|layername=", 1)[0]
+                key = _norm_layer_key(p)
+                if key and key not in seen_keys and Path(clean_file).exists():
+                    kind = self.workspace._classify_path(Path(clean_file))
                     if kind in {"vector", "raster"}:
-                        seen_paths.add(p)
-                        discovered_layers.append({"path": p, "name": Path(p).name, "kind": kind})
+                        seen_keys.add(key)
+                        discovered_layers.append({
+                            "path": p,
+                            "name": Path(clean_file).name,
+                            "kind": kind,
+                            "role": "result" if key in result_keys else "intermediate",
+                        })
+        for p in result_paths:
+            clean_file = p.split("|layername=", 1)[0]
+            key = _norm_layer_key(p)
+            if key and key not in seen_keys and Path(clean_file).exists():
+                kind = self.workspace._classify_path(Path(clean_file))
+                if kind in {"vector", "raster"}:
+                    seen_keys.add(key)
+                    discovered_layers.append({
+                        "path": p,
+                        "name": Path(clean_file).name,
+                        "kind": kind,
+                        "role": "result",
+                    })
 
         return {
             "session_id": session_id,

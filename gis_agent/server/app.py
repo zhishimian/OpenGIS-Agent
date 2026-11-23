@@ -327,6 +327,7 @@ def create_app(
         max_features: int = 5000,
         simplify_tol: float | None = None,
         fields: str | None = None,
+        fids: str | None = None,
     ) -> dict[str, Any]:
         def run():
             uri = _auth_uri(path)
@@ -337,8 +338,20 @@ def create_app(
                     raise ValueError("bbox 必须为 4 个逗号分隔数值：west,south,east,north")
                 parsed_bbox = (parts[0], parts[1], parts[2], parts[3])
             parsed_fields = [f.strip() for f in fields.split(",") if f.strip()] if fields is not None else None
+            parsed_fids = None
+            if fids is not None and fids.strip():
+                try:
+                    parsed_fids = [int(x.strip()) for x in fids.split(",") if x.strip()][:200]
+                except ValueError as exc:
+                    raise ValueError("fids 必须为逗号分隔的整数列表") from exc
             return spatial.get_vector_geojson(
-                uri, bbox=parsed_bbox, zoom=zoom, max_features=max_features, simplify_tol=simplify_tol, fields=parsed_fields
+                uri,
+                bbox=parsed_bbox,
+                zoom=zoom,
+                max_features=max_features,
+                simplify_tol=simplify_tol,
+                fields=parsed_fields,
+                fids=parsed_fids,
             )
 
         return _guard_http(run)

@@ -141,7 +141,13 @@ export const api = {
     apiFetch<any>(`/api/spatial/layer-meta?${new URLSearchParams({ path }).toString()}`),
   getVectorGeojson: (
     path: string,
-    opts: { bbox?: [number, number, number, number]; zoom?: number; max_features?: number } = {}
+    opts: {
+      bbox?: [number, number, number, number];
+      zoom?: number;
+      max_features?: number;
+      fids?: number[];
+      signal?: AbortSignal;
+    } = {}
   ) =>
     apiFetch<any>(
       `/api/spatial/vector?${new URLSearchParams({
@@ -149,7 +155,9 @@ export const api = {
         ...(opts.bbox ? { bbox: opts.bbox.join(",") } : {}),
         ...(opts.zoom !== undefined ? { zoom: String(opts.zoom) } : {}),
         ...(opts.max_features !== undefined ? { max_features: String(opts.max_features) } : {}),
-      }).toString()}`
+        ...(opts.fids && opts.fids.length ? { fids: opts.fids.join(",") } : {}),
+      }).toString()}`,
+      { signal: opts.signal }
     ),
   identify: (payload: { lon: number; lat: number; zoom: number; layers: Array<{ path: string; type: string }> }) =>
     apiFetch<IdentifyResult>("/api/spatial/identify", {

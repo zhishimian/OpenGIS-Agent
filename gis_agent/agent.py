@@ -295,6 +295,9 @@ class Agent:
             name = call["function"]["name"]
             identifier = None
             elapsed_ms = 0.0
+            executed = False
+            tool_outputs: list[Any] = []
+            arguments: dict[str, Any] | None = None
             if self._is_cancelled():
                 result: Any = {"ok": False, "status": "cancelled", "cancelled": True, "error": "任务已中止，该调用未启动。"}
             else:
@@ -347,34 +350,7 @@ class Agent:
                             result = self.accept_finish(result, state)
                         message["executions"][call["id"]] = "finished"
                         tool_outputs = result.get("outputs", []) if isinstance(result, dict) and "outputs" in result else []
-                        emit_event(
-                            self.on_event, "tool_finished", self.store.session_id,
-                            tool=name, call_id=call["id"], ok=result.get("ok") if isinstance(result, dict) else True,
-                            elapsed_ms=elapsed_ms, outputs=tool_outputs,
-                        )
-                        if isinstance(result, dict) and result.get("ok") is True:
-                            if name == "update_plan" and isinstance(result.get("plan"), dict):
-                                emit_event(
-                                    self.on_event, "plan_updated", self.store.session_id,
-                                    goal=result["plan"].get("goal", ""),
-                                    steps=result["plan"].get("steps", []),
-                                )
-                            self._emit_published_artifacts(
-                                name, result,
-                                is_finish=(name == "finish_task"),
-                            )
-                            if name == "finish_task" and result.get("status") == "needs_input":
-                                emit_event(
-                                    self.on_event, "interaction_required", self.store.session_id,
-                                    request_id=identifier or f"q{len(self.messages)}",
-                                    checkpoint_kind=result.get("checkpoint_kind") or "clarification",
-                                    summary=result["summary"],
-                                    question=result.get("question", result["summary"]),
-                                    options=result.get("options", []),
-                                    reason=result.get("reason"),
-                                    artifacts=result.get("artifacts", []),
-                                    unresolved=result.get("unresolved", []),
-                                )
+                        executed = True
             if name in {"remember_memory", "forget_memory"}:
                 errors = set(state["memory_errors"])
                 if isinstance(result, dict) and result.get("ok"):
@@ -390,6 +366,36 @@ class Agent:
             self.messages.append(stored)
             self.store.save(self.messages)
             logger.info("工具 %s：%s", name, stored["content"][:1200])
+            if executed:
+                emit_event(
+                    self.on_event, "tool_finished", self.store.session_id,
+                    tool=name, call_id=call["id"], ok=result.get("ok") if isinstance(result, dict) else True,
+                    elapsed_ms=elapsed_ms, outputs=tool_outputs,
+                )
+                if isinstance(result, dict) and result.get("ok") is True:
+                    if name == "update_plan" and isinstance(result.get("plan"), dict):
+                        emit_event(
+                            self.on_event, "plan_updated", self.store.session_id,
+                            goal=result["plan"].get("goal", ""),
+                            steps=result["plan"].get("steps", []),
+                        )
+                    self._emit_published_artifacts(
+                        name, result,
+                        arguments=arguments,
+                        is_finish=(name == "finish_task"),
+                    )
+                    if name == "finish_task" and result.get("status") == "needs_input":
+                        emit_event(
+                            self.on_event, "interaction_required", self.store.session_id,
+                            request_id=identifier or f"q{len(self.messages)}",
+                            checkpoint_kind=result.get("checkpoint_kind") or "clarification",
+                            summary=result["summary"],
+                            question=result.get("question", result["summary"]),
+                            options=result.get("options", []),
+                            reason=result.get("reason"),
+                            artifacts=result.get("artifacts", []),
+                            unresolved=result.get("unresolved", []),
+                        )
         if self._is_cancelled() and state.get("outcome") is None:
             state["outcome"] = {
                 "ok": True,
@@ -464,11 +470,31 @@ class Agent:
         state["outcome"] = result
         return result
 
-    def _emit_published_artifacts(self, source_tool: str, result: dict[str, Any], *, is_finish: bool = False) -> None:
+    def _emit_published_artifacts(
+        self,
+        source_tool: str,
+        result: dict[str, Any],
+        *,
+        arguments: dict[str, Any] | None = None,
+        is_finish: bool = False,
+    ) -> None:
         if self.on_event is None:
             return
         seen: set[str] = set()
         candidates: list[dict[str, Any]] = []
+        if source_tool == "inspect_data" and isinstance(arguments, dict):
+            src = arguments.get("source")
+            if isinstance(src, str) and src.strip():
+                candidates.append({"path": src, "_role": "input"})
+            srcs = arguments.get("sources")
+            if isinstance(srcs, list):
+                for item in srcs:
+                    if isinstance(item, str) and item.strip():
+                        candidates.append({"path": item, "_role": "input"})
+        elif source_tool == "read_file" and isinstance(arguments, dict):
+            fpath = arguments.get("path")
+            if isinstance(fpath, str) and fpath.lower().endswith(".csv"):
+                candidates.append({"path": fpath, "_role": "input"})
         outputs = result.get("outputs")
         if isinstance(outputs, list):
             for item in outputs:
@@ -490,7 +516,7 @@ class Agent:
             if norm in seen:
                 continue
             seen.add(norm)
-            clean_path = raw_path.split("|layername=", 1)[0]
+            clean_path, sep, layer_part = raw_path.partition("|layername=")
             file_path = Path(clean_path)
             if not file_path.exists():
                 continue
@@ -498,12 +524,17 @@ class Agent:
             size_bytes = int(item.get("bytes")) if isinstance(item.get("bytes"), int) else (file_path.stat().st_size if file_path.is_file() else 0)
             if size_bytes == 0 and file_path.is_file():
                 continue
+            resolved_path = str(file_path.resolve())
+            if sep:
+                resolved_path = f"{resolved_path}|layername={layer_part.split('|', 1)[0]}"
             payload: dict[str, Any] = {
-                "path": str(file_path.resolve()),
+                "path": resolved_path,
                 "kind": kind,
                 "name": file_path.name,
                 "bytes": size_bytes,
                 "source_tool": source_tool,
+                "role": item.get("_role") or ("result" if is_finish else "intermediate"),
+                "is_finish": bool(is_finish),
                 "preview_ready": kind in {"vector", "raster", "figure", "html_map", "table", "script"},
             }
             if isinstance(item.get("spatial"), dict):

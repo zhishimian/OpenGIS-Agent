@@ -2,6 +2,7 @@ export type ExecutionPolicy = "auto" | "plan_first" | "step_review";
 export type WorkspaceTab = "map" | "figures" | "code";
 export type MapToolMode = "pan" | "identify" | "bbox" | "polygon" | "select_fid";
 export type BasemapKind = "offline" | "positron" | "dark" | "osm";
+export type LayerRole = "result" | "intermediate" | "input";
 
 export interface PlanStep {
   content: string;
@@ -137,6 +138,9 @@ export interface LayerItem {
   path: string;
   name: string;
   kind: "vector" | "raster";
+  role: LayerRole;
+  sourceTool?: string;
+  userTouchedVisible?: boolean;
   visible: boolean;
   opacity: number;
   color: string;
@@ -147,16 +151,42 @@ export interface LayerItem {
   bandCount: number;
   colormap: string;
   bboxWgs84: [number, number, number, number] | null;
+  fullBboxWgs84: [number, number, number, number] | null;
   fields: string[];
   geometryType?: string;
   totalFeatures?: number;
   truncated?: boolean;
+  viewportLoading?: boolean;
+  viewportReturned?: number;
+  warnings?: string[];
   geojson?: GeoJsonFeatureCollection;
   rasterBounds?: [number, number, number, number];
   rasterUrl?: string;
   stats?: { min?: number | null; max?: number | null; vmin?: number | null; vmax?: number | null };
   loading?: boolean;
   error?: string;
+}
+
+export interface HighlightedFeature {
+  path: string;
+  fid: number;
+  feature: Record<string, any> | null;
+}
+
+export interface PendingContainerSublayer {
+  name: string;
+  source: string;
+  geometry_type?: string;
+  feature_count?: number;
+  crs?: string;
+  bbox_wgs84?: [number, number, number, number] | null;
+}
+
+export interface PendingContainer {
+  path: string;
+  name: string;
+  role: LayerRole;
+  layers: PendingContainerSublayer[];
 }
 
 export interface ToolActivity {
