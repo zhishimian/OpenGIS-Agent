@@ -126,10 +126,9 @@ def test_v6_summary_cache_and_original_message_readback(tmp_path: Path, count_to
         {"role": "user", "origin": "user", "content": "继续。"},
     ]
     store.save(messages)
-    summary = {key: [] for key in SUMMARY_SECTIONS}
-    summary["requirements"] = [{"text": "保存为 GeoPackage", "sources": [0]}]
+    summary = "## 1. 当前总目标与不可违背约束\n- 结果必须保存为 GeoPackage。"
     config = ContextConfig(recent_users=1)
-    fixed = lambda *_: ModelReply({"role": "assistant", "content": json.dumps(summary)}, "fixed", None, "stop")
+    fixed = lambda *_: ModelReply({"role": "assistant", "content": summary}, "fixed", None, "stop")
     context = make_context(store, config, set(), count_tokens, fixed)
     context.compact(messages, 1)
     restored = make_context(store, config, set(), count_tokens)
@@ -914,15 +913,13 @@ def test_ninety_percent_compaction_triggers_before_hard_limit(tmp_path: Path) ->
     tight_limit = max(600, int(full_tokens / 0.94))
     assert int(tight_limit * 0.9) < full_tokens <= tight_limit
 
-    summary = {key: [] for key in SUMMARY_SECTIONS}
-    summary["goal"] = [{"text": "完成三阶段分析", "sources": [0]}]
-    summary["work"] = [{"text": "已完成第 0 批", "sources": [1, 2]}]
+    summary = "## 1. 当前总目标与不可违背约束\n- 完成三阶段分析\n\n## 2. 已完成阶段与经验证的数值真值表\n- 已完成第 0 批"
     compact_calls = 0
 
     def fake_summary(*_args: Any) -> ModelReply:
         nonlocal compact_calls
         compact_calls += 1
-        return ModelReply({"role": "assistant", "content": json.dumps(summary, ensure_ascii=False)}, "offline", None, "stop")
+        return ModelReply({"role": "assistant", "content": summary}, "offline", None, "stop")
 
     active_ctx = ContextManager(
         store,
@@ -1313,3 +1310,160 @@ def test_verification_hint_attached_only_on_anomalies_or_finish_rejection(tmp_pa
     finish_msgs = [json.loads(m["content"]) for m in store.load() if m.get("tool_name") == "finish_task"]
     assert not finish_msgs[0]["ok"] and "gis-verification/SKILL.md" in finish_msgs[0]["verification_hint"]
     assert finish_msgs[1]["ok"] and "verification_hint" not in finish_msgs[1]
+
+
+def test_v912_markdown_summary_allows_over_budget_and_preserves_values(tmp_path: Path, count_tokens) -> None:
+    """L4 摘要采用纯 Markdown：略超软预算时不再崩溃，完整保留 CRS/RMSE/面积真值并落盘 v2。"""
+    store = SessionStore(tmp_path, "v912_soft_md")
+    messages = [
+        {"role": "user", "origin": "user", "content": "请采用 EPSG:4526，评估温度与降雨精度。"},
+        {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "analysis", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "tool_name": "analysis", "content": json.dumps({"ok": True})},
+        {"role": "user", "origin": "user", "content": "继续写入报告。"},
+    ]
+    store.save(messages)
+    long_markdown = (
+        "## 1. 当前总目标与不可违背约束\n- EPSG:4526\n\n"
+        "## 2. 已完成阶段与经验证的数值真值表\n"
+        "- PRE_RMSE=0.3665 mm (n=48), area=1234.56 km²\n"
+        + ("- 过程明细：无异常。\n" * 600)
+    )
+    assert len(long_markdown) > 6000
+    config = ContextConfig(summary_limit=6000, recent_users=1)
+    ctx = make_context(
+        store, config, set(), count_tokens,
+        lambda *_: ModelReply({"role": "assistant", "content": long_markdown}, "fixed", None, "stop"),
+    )
+    ctx.compact(messages, 3)
+    assert ctx.covered == 3
+    assert "EPSG:4526" in ctx.summary and "0.3665 mm" in ctx.summary and "1234.56 km²" in ctx.summary
+    saved_state = json.loads(store.context_path.read_text(encoding="utf-8"))
+    assert saved_state["version"] == 2 and saved_state["covered"] == 3 and saved_state["micro_covered"] == 3
+
+
+def test_v912_micro_compact_tool_only_preserves_assistant_and_gis_whitelists(tmp_path: Path) -> None:
+    """L3 只折 tool_result，绝不篡改 assistant 参数，保留全量输出路径与报错首尾堆栈。"""
+    store = SessionStore(tmp_path, "v912_micro_whitelist")
+    out_dir = tmp_path / "out"
+    outputs = [{"path": str(out_dir / f"layer_{i}.tif")} for i in range(5)]
+    stderr_text = "START_SCRIPT: calc.py line 19 fail\n" + ("mid_trace\n" * 80) + "END_ERR: ValueError bad CRS"
+    large_script = "print('keep assistant write_file intact')\n" * 50
+    messages = [
+        {"role": "user", "origin": "user", "content": "运行任务"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "w1", "function": {"name": "write_file", "arguments": json.dumps({"path": "a.py", "content": large_script})}}
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "w1",
+            "tool_name": "run_python_script",
+            "content": json.dumps({"ok": False, "outputs": outputs, "stderr": stderr_text, "log": "z" * 4000}),
+        },
+        {"role": "assistant", "tool_calls": [{"id": "c2", "function": {"name": "analysis", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c2", "tool_name": "analysis", "content": "{}"},
+    ]
+    store.save(messages)
+    projected = store.project(messages, 8000, micro_before=3)
+    # assistant tool_calls.arguments 必须一字节不变
+    assert projected[1]["tool_calls"][0]["function"]["arguments"] == messages[1]["tool_calls"][0]["function"]["arguments"]
+    folded = json.loads(projected[2]["content"])
+    assert folded["micro_compacted"] is True
+    assert folded["outputs_root"] == str(out_dir)
+    assert folded["output_files"] == [f"layer_{i}.tif" for i in range(5)]
+    assert "START_SCRIPT: calc.py" in folded["stderr"] and "END_ERR: ValueError bad CRS" in folded["stderr"]
+
+
+def test_v912_micro_compact_step_transition_and_plan_note_guard(tmp_path: Path, count_tokens) -> None:
+    """仅建表/改备注不触发游标；步骤状态跃迁为 completed 且可回收 >= 门槛时推进并写入 v2。"""
+    store = SessionStore(tmp_path, "v912_step_trigger")
+    plan = Plan()
+    tools = [
+        *make_planning_tools(plan),
+        Tool("big_tool", "大输出", {"type": "object"}, lambda: {"ok": True, "blob": "x" * 6000}),
+    ]
+    reg = ToolRegistry()
+    for t in tools:
+        reg.register(t)
+
+    seen_prompts: list[list[dict[str, Any]]] = []
+    replies = iter([
+        reply("p1", "update_plan", {"goal": "测试", "steps": [{"content": "步骤A", "status": "in_progress"}]}),
+        reply("b1", "big_tool", {}),
+        reply("b2", "big_tool", {}),
+        reply("b3", "big_tool", {}),
+        reply("p2", "update_plan", {"goal": "测试", "steps": [{"content": "步骤A-改备注", "status": "in_progress"}]}),
+        reply("b4", "big_tool", {}),
+        reply("p3", "update_plan", {"goal": "测试", "steps": [{"content": "步骤A-改备注", "status": "completed"}]}),
+        reply("fin", "finish_task", {"status": "completed", "summary": "完成"}),
+    ])
+
+    def capture_chat(msgs: list[dict[str, Any]], schemas: list[dict[str, Any]]) -> ModelReply:
+        seen_prompts.append(msgs)
+        return next(replies)
+
+    cfg = ContextConfig(micro_keep_batches=2, micro_min_reclaim_chars=5000, micro_trigger_tokens=500_000)
+    agent = Agent(reg, tools, unexpected_model_call, plan, "系统", capture_chat, store, make_context(store, cfg, {t.name for t in tools}, count_tokens))
+    assert agent.run([{"role": "user", "origin": "user", "content": "开始"}])["status"] == "completed"
+    # p2 只改备注未跃迁 completed -> micro_covered 未推进；p3 跃迁 completed 后最后一次 fin 请求已折叠早期 big_tool
+    assert "x" * 5000 in str(seen_prompts[5])
+    assert '"micro_compacted":true' in str(seen_prompts[7])
+    assert agent.context.micro_covered > 0
+    saved_state = json.loads(store.context_path.read_text(encoding="utf-8"))
+    assert saved_state["version"] == 2 and saved_state["micro_covered"] == agent.context.micro_covered
+
+
+def test_v912_reactive_compact_two_tier_recovery_and_circuit_breaker(tmp_path: Path, count_tokens) -> None:
+    """捕获 context_length_exceeded 时执行第1/第2级自愈压缩，持续超限则熔断为 blocked。"""
+    from gis_agent.core.model import ModelError
+
+    # 1) 第1级命中即通过（keep recent_batches=2，再尝试恢复为第2级 keep=0）
+    store1 = SessionStore(tmp_path / "s1", "reactive_ok")
+    plan1 = Plan()
+    tools1 = [*make_planning_tools(plan1), Tool("work", "计算", {"type": "object"}, lambda: {"ok": True, "detail": "d" * 100})]
+    reg1 = ToolRegistry()
+    for t in tools1:
+        reg1.register(t)
+    main_calls = 0
+
+    def main_chat(msgs: list[dict[str, Any]], schemas: list[dict[str, Any]]) -> ModelReply:
+        nonlocal main_calls
+        main_calls += 1
+        if main_calls == 1:
+            return reply("w1", "work", {})
+        if main_calls == 2:
+            return reply("w2", "work", {})
+        if main_calls in (3, 4):
+            raise ModelError("context_length_exceeded")
+        return reply("fin", "finish_task", {"status": "completed", "summary": "自愈成功"})
+
+    sum_chat = lambda *_: ModelReply({"role": "assistant", "content": "## 1. 目标\n- 已浓缩"}, "offline", None, "stop")
+    agent1 = Agent(
+        reg1, tools1, unexpected_model_call, plan1, "系统", main_chat, store1,
+        make_context(store1, ContextConfig(recent_users=1), {t.name for t in tools1}, count_tokens, sum_chat),
+    )
+    out1 = agent1.run([{"role": "user", "origin": "user", "content": "执行计算"}])
+    assert out1["status"] == "completed" and main_calls == 5 and agent1.context.covered > 0
+
+    # 2) 持续超限 -> 熔断退出成 blocked（最多重试 2 次即第 3 次抛出时停止）
+    store2 = SessionStore(tmp_path / "s2", "reactive_trip")
+    plan2 = Plan()
+    tools2 = make_planning_tools(plan2)
+    reg2 = ToolRegistry()
+    for t in tools2:
+        reg2.register(t)
+    trip_calls = 0
+
+    def always_too_long(*_args: Any) -> ModelReply:
+        nonlocal trip_calls
+        trip_calls += 1
+        raise ModelError("maximum context length exceeded")
+
+    agent2 = Agent(
+        reg2, tools2, unexpected_model_call, plan2, "系统", always_too_long, store2,
+        make_context(store2, ContextConfig(recent_users=1), {t.name for t in tools2}, count_tokens, sum_chat),
+    )
+    out2 = agent2.run([{"role": "user", "origin": "user", "content": "必超限"}])
+    assert out2["status"] == "blocked" and "两级自愈压缩未恢复" in out2["summary"] and trip_calls == 3

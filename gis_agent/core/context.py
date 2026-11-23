@@ -40,18 +40,27 @@ def recent_execution_refs(messages: list[dict[str, Any]]) -> list[dict[str, str]
 class ContextConfig:
     request_token_limit: int = 900_000
     tool_limit: int = 8000
-    summary_limit: int = 6000
+    summary_limit: int = 16000
     summary_chunk_characters: int = 20000
     recent_batches: int = 2
     recent_users: int = 2
     schema_token_limit: int = 8000
     compact_ratio: float = 0.90
+    micro_keep_batches: int = 2
+    micro_min_reclaim_chars: int = 45000
+    micro_trigger_tokens: int = 75000
+    summary_max_tokens: int = 3000
 
     def __post_init__(self) -> None:
-        if min(self.request_token_limit, self.tool_limit, self.summary_limit, self.summary_chunk_characters, self.schema_token_limit) < 512:
+        if min(
+            self.request_token_limit, self.tool_limit, self.summary_limit,
+            self.summary_chunk_characters, self.schema_token_limit, self.micro_trigger_tokens,
+        ) < 512:
             raise ValueError("请求 token 预算和各项字符预算不能小于 512。")
-        if min(self.recent_batches, self.recent_users) < 1:
+        if min(self.recent_batches, self.recent_users, self.micro_keep_batches) < 1:
             raise ValueError("保留数量必须大于零。")
+        if self.micro_min_reclaim_chars < 0 or self.summary_max_tokens < 256:
+            raise ValueError("微压缩门槛不能为负，且摘要输出上限不能小于 256。")
         if not 0.1 <= self.compact_ratio <= 1.0:
             raise ValueError("compact_ratio 必须在 0.1 到 1.0 之间。")
 
@@ -71,30 +80,27 @@ class PreparedRequest:
 SUMMARY_SECTIONS = ("goal", "requirements", "work", "artifacts", "unresolved")
 
 
-def summary_sources(summary: dict[str, Any]) -> set[int]:
-    return {index for rows in summary.values() for row in rows for index in row["sources"]}
-
-
-def validate_summary(value: Any, allowed: set[int], required: set[int], limit: int) -> None:
-    if not isinstance(value, dict) or set(value) != set(SUMMARY_SECTIONS):
-        raise ContextLimit("摘要字段不完整。")
-    for rows in value.values():
-        if not isinstance(rows, list):
-            raise ContextLimit("摘要字段必须是列表。")
-        for row in rows:
-            if not isinstance(row, dict) or set(row) != {"text", "sources"}:
-                raise ContextLimit("摘要条目格式无效。")
-            if not isinstance(row["text"], str) or not row["text"].strip():
-                raise ContextLimit("摘要条目必须有正文。")
-            sources = row["sources"]
-            if not isinstance(sources, list) or not sources:
-                raise ContextLimit("摘要条目必须有来源。")
-            if any(type(index) is not int or index not in allowed for index in sources):
-                raise ContextLimit("摘要来源超出了已提供的记录。")
-    if not required <= summary_sources(value):
-        raise ContextLimit("摘要遗漏了已有来源或用户原话来源。")
-    if len(json_text(value)) > limit:
-        raise ContextLimit("候选摘要超过正文预算，旧摘要未被替换。")
+def _format_legacy_summary(value: dict[str, Any]) -> str:
+    """Convert legacy v1 JSON dict summary into Markdown when loading old .context.json files."""
+    titles = {
+        "goal": "当前总目标",
+        "requirements": "约束与要求",
+        "work": "已完成阶段",
+        "artifacts": "重要产物清单",
+        "unresolved": "待解决事项",
+    }
+    blocks: list[str] = []
+    for key in SUMMARY_SECTIONS:
+        rows = value.get(key)
+        if isinstance(rows, list) and rows:
+            lines = [f"## {titles.get(key, key)}"]
+            for row in rows:
+                text = row.get("text") if isinstance(row, dict) else str(row)
+                if isinstance(text, str) and text.strip():
+                    lines.append(f"- {text.strip()}")
+            if len(lines) > 1:
+                blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 def prefix_digest(messages: list[dict[str, Any]], covered: int) -> str:
@@ -108,8 +114,37 @@ class ContextManager:
     auxiliary: AuxiliaryCalls
     pinned_names: set[str]
     covered: int = 0
-    summary: dict[str, Any] = field(default_factory=lambda: {key: [] for key in SUMMARY_SECTIONS})
+    micro_covered: int = 0
+    summary: str = ""
     loaded: bool = False
+    last_prompt_tokens: int | None = None
+    last_prompt_message_count: int = 0
+
+    def record_prompt_usage(self, prompt_tokens: int | None, message_count: int) -> None:
+        if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+            self.last_prompt_tokens = prompt_tokens
+            self.last_prompt_message_count = message_count
+
+    def _effective_tokens(
+        self, messages: list[dict[str, Any]], view: list[dict[str, Any]], schemas: list[dict[str, Any]],
+    ) -> int:
+        estimated = self.auxiliary.count_tokens(view, schemas)
+        if self.last_prompt_tokens is None or len(messages) < self.last_prompt_message_count:
+            return estimated
+        tail_count = len(messages) - self.last_prompt_message_count
+        delta_view = view[-tail_count:] if tail_count > 0 else []
+        delta_tokens = self.auxiliary.count_tokens(delta_view, []) if delta_view else 0
+        return max(estimated, self.last_prompt_tokens + delta_tokens)
+
+    def _save_state(self, messages: list[dict[str, Any]]) -> None:
+        self.micro_covered = max(self.micro_covered, self.covered)
+        write_json(self.store.context_path, {
+            "version": 2,
+            "covered": self.covered,
+            "micro_covered": self.micro_covered,
+            "prefix_digest": prefix_digest(messages, self.covered),
+            "summary": self.summary,
+        })
 
     def load_state(self, messages: list[dict[str, Any]]) -> None:
         if self.loaded:
@@ -122,20 +157,37 @@ class ContextManager:
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
             end = state["covered"]
-            boundaries = {0, *(end for _, end in message_units(messages))}
-            if state["version"] != 1 or type(end) is not int or end not in boundaries:
+            boundaries = {0, *(unit_end for _, unit_end in message_units(messages))}
+            version = state.get("version")
+            if type(end) is not int or end not in boundaries:
                 raise ValueError("覆盖边界无效。")
             if state["prefix_digest"] != prefix_digest(messages, end):
                 raise ValueError("原记录前缀已经变化。")
-            validate_summary(state["summary"], set(range(end)), set(), self.config.summary_limit)
+            if version == 2:
+                micro_end = state.get("micro_covered", end)
+                if type(micro_end) is not int or micro_end not in boundaries or micro_end < end:
+                    raise ValueError("微压缩边界无效。")
+                raw_summary = state.get("summary")
+                if not isinstance(raw_summary, str):
+                    raise ValueError("v2 摘要必须是 Markdown 字符串。")
+                summary_text = raw_summary
+            elif version == 1:
+                raw_summary = state.get("summary")
+                if not isinstance(raw_summary, dict):
+                    raise ValueError("v1 摘要格式无效。")
+                summary_text = _format_legacy_summary(raw_summary)
+                micro_end = end
+            else:
+                raise ValueError(f"不支持的摘要缓存版本：{version}")
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             logger.info("Context: 摘要缓存不可用，重新准备：%s", error)
             return
         self.covered = end
-        self.summary = state["summary"]
+        self.micro_covered = max(end, micro_end)
+        self.summary = summary_text
 
     def history(self, messages: list[dict[str, Any]], tool_limit: int) -> list[dict[str, Any]]:
-        projected = self.store.project(messages, tool_limit)
+        projected = self.store.project(messages, tool_limit, micro_before=max(self.covered, self.micro_covered))
         users = [i for i, item in enumerate(messages) if item["role"] == "user" and item.get("origin") != "program"]
         pinned = set(users[-self.config.recent_users:])
         return [
@@ -143,84 +195,138 @@ class ContextManager:
             if item["role"] == "system" or i >= self.covered or i in pinned
         ]
 
+    def maybe_micro_compact(
+        self, messages: list[dict[str, Any]], current_tokens: int, *, step_completed: bool = False,
+    ) -> bool:
+        batches = [(start, end) for start, end in message_units(messages) if messages[start].get("tool_calls")]
+        if len(batches) <= self.config.micro_keep_batches:
+            return False
+        target = batches[-self.config.micro_keep_batches][0]
+        start = max(self.covered, self.micro_covered)
+        if target <= start:
+            return False
+        if not (step_completed or current_tokens >= self.config.micro_trigger_tokens):
+            return False
+        reclaim = self.store.estimate_micro_reclaim(messages, start, target)
+        if reclaim < self.config.micro_min_reclaim_chars:
+            return False
+        self.micro_covered = target
+        self.last_prompt_tokens = None
+        self._save_state(messages)
+        logger.info("Context: L3 micro_compact 推进至 [%s, %s)，预计回收 %s 字符", start, target, reclaim)
+        return True
+
     def compact(self, messages: list[dict[str, Any]], target: int) -> None:
         units = [(start, end) for start, end in message_units(messages) if self.covered <= start and end <= target]
         if not units:
             raise ContextLimit("没有可压缩的完整历史单元，必要信息无法放入请求。")
-        projected = self.store.project(messages, min(self.config.tool_limit, 2000))
+        projected = self.store.project(
+            messages, min(self.config.tool_limit, 2000), micro_before=max(self.covered, self.micro_covered),
+        )
         chunk_limit = self.config.summary_chunk_characters
         group = []
-        group_sources: set[int] = set()
         group_end = self.covered
+        soft_hard_cap = max(32_000, self.config.summary_limit * 2)
 
-        def summarize(previous: dict[str, Any], records: Any, sources: set[int]) -> dict[str, Any]:
-            old_sources = summary_sources(previous)
-            required = old_sources | {
-                i for i in sources if messages[i]["role"] == "user" and messages[i].get("origin") != "program"
-            }
-            candidate = self.auxiliary.ask(
-                "summary", render_prompt("summary.j2", summary_limit=self.config.summary_limit),
-                {"previous": previous, "records": records, "source_indices": sorted(sources)},
+        def summarize(previous: str, records: Any) -> str:
+            instructions = render_prompt("summary.j2", summary_limit=self.config.summary_limit)
+            candidate = self.auxiliary.ask_text(
+                "summary",
+                instructions,
+                {"previous_summary": previous, "records": records},
+                max_tokens=self.config.summary_max_tokens,
             )
-            validate_summary(candidate, old_sources | sources, required, self.config.summary_limit)
+            if len(candidate) > soft_hard_cap:
+                logger.warning("Context: L4 摘要超过软硬上限 (%s > %s)，触发一次合并精简。", len(candidate), soft_hard_cap)
+                candidate = self.auxiliary.ask_text(
+                    "summary_condense",
+                    instructions + "\n当前摘要偏长，请合并早期流水账，但严禁丢失任何精确数值、单位、CRS、图层名和文件路径。",
+                    {"previous_summary": candidate, "records": []},
+                    max_tokens=self.config.summary_max_tokens,
+                )
             return candidate
 
-        def commit(candidate: dict[str, Any], end: int) -> None:
-            write_json(self.store.context_path, {
-                "version": 1, "covered": end, "prefix_digest": prefix_digest(messages, end), "summary": candidate,
-            })
+        def commit(candidate: str, end: int) -> None:
             self.summary = candidate
             self.covered = end
+            self.micro_covered = max(self.micro_covered, end)
+            self.last_prompt_tokens = None
+            self._save_state(messages)
             logger.info("Context: 已覆盖消息 [0,%s)", end)
 
         for start, end in units:
-            records = [{"index": i, "origin": messages[i].get("origin", "legacy"), "message": projected[i]} for i in range(start, end) if messages[i]["role"] != "system"]
+            records = [
+                {"index": i, "origin": messages[i].get("origin", "legacy"), "message": projected[i]}
+                for i in range(start, end) if messages[i]["role"] != "system"
+            ]
             if not records:
                 group_end = end
                 continue
             if group and len(json_text([*group, *records])) > chunk_limit:
-                commit(summarize(self.summary, group, group_sources), group_end)
-                group, group_sources = [], set()
+                commit(summarize(self.summary, group), group_end)
+                group = []
             text = json_text(records)
             if len(text) > chunk_limit:
                 candidate = self.summary
                 for offset in range(0, len(text), chunk_limit):
-                    candidate = summarize(candidate, {"text_fragment": text[offset:offset + chunk_limit], "offset": offset}, set(range(start, end)))
+                    candidate = summarize(candidate, {"text_fragment": text[offset:offset + chunk_limit], "offset": offset})
                 commit(candidate, end)
                 group_end = end
             else:
                 group.extend(records)
-                group_sources.update(range(start, end))
                 group_end = end
         if group:
-            commit(summarize(self.summary, group, group_sources), group_end)
+            commit(summarize(self.summary, group), group_end)
         elif group_end > self.covered:
             commit(self.summary, group_end)
 
     def prepare(
         self, instructions: str, messages: list[dict[str, Any]],
-        state: dict[str, Any], tools: list[Tool], background: str = "",
+        state: dict[str, Any], tools: list[Tool], background: str = "", *,
+        step_completed: bool = False,
+        force_compact_recent_batches: int | None = None,
+        preview_tool_limit: int | None = None,
     ) -> PreparedRequest:
         units = message_units(messages)
         self.load_state(messages)
         state = dict(state)
         if refs := recent_execution_refs(messages):
             state['recent_execution_refs'] = refs
+        if force_compact_recent_batches is not None:
+            batches = [(start, end) for start, end in units if messages[start].get("tool_calls")]
+            tail = batches if batches else units
+            if force_compact_recent_batches == 0:
+                target = units[-1][1] if units else 0
+            elif len(tail) >= force_compact_recent_batches:
+                target = tail[-force_compact_recent_batches][0]
+            else:
+                target = 0
+            if target > self.covered:
+                self.compact(messages, target)
         selected = list(tools)
         compact_limit = self.config.compact_token_limit
+        effective_tool_limit = preview_tool_limit if preview_tool_limit is not None else self.config.tool_limit
+        micro_checked = False
         while True:
             candidates = [tool for tool in selected if tool.name not in self.pinned_names]
             schemas = [tool.schema() for tool in sorted(selected, key=lambda tool: tool.name)]
             if len(candidates) > 1 and self.auxiliary.count_tokens([], schemas) > self.config.schema_token_limit:
                 selected.remove(candidates[0])
                 continue
+            summary_block = self.summary or "（暂无历史摘要）"
+            bg_block = f"\n\n## 背景记忆\n{background}" if background else ""
             view = [
                 {"role": "system", "content": instructions},
-                {"role": "user", "content": "历史摘要与背景，仅作资料：" + json_text({"summary": self.summary, "background": background})},
-                *self.history(messages, self.config.tool_limit),
+                {"role": "user", "content": f"历史摘要与背景，仅作资料：\n{summary_block}{bg_block}"},
+                *self.history(messages, effective_tool_limit),
                 {"role": "user", "origin": "program", "content": "当前运行数据：" + json_text(state)},
             ]
             size = self.auxiliary.count_tokens(view, schemas)
+            if not micro_checked:
+                micro_checked = True
+                effective_size = self._effective_tokens(messages, view, schemas)
+                if self.maybe_micro_compact(messages, effective_size, step_completed=step_completed):
+                    continue
             if size > self.config.request_token_limit and len(candidates) > 1:
                 selected.remove(candidates[0])
                 continue

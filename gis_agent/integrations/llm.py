@@ -86,6 +86,7 @@ def image_part(part: dict[str, Any]) -> dict[str, Any]:
 def chat(
     client: OpenAI, config: ModelConfig,
     messages: list[dict[str, Any]], schemas: list[dict[str, Any]],
+    *, max_tokens: int | None = None,
 ) -> ModelReply:
     view, _ = request_view(messages, config)
     fingerprint = {
@@ -98,7 +99,9 @@ def chat(
         if isinstance(message.get("content"), list):
             message["content"] = [image_part(part) for part in message["content"]]
     arguments: dict[str, Any] = {
-        "model": config.model, "messages": view, config.output_parameter: config.max_tokens,
+        "model": config.model,
+        "messages": view,
+        config.output_parameter: max_tokens if max_tokens is not None else config.max_tokens,
     }
     if schemas:
         arguments["tools"] = schemas

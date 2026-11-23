@@ -52,6 +52,51 @@ def message_units(messages: list[dict[str, Any]]) -> list[tuple[int, int]]:
     return units
 
 
+def _head_tail(text: str, head: int = 200, tail: int = 300) -> str:
+    if len(text) <= head + tail + 24:
+        return text
+    omitted = len(text) - head - tail
+    return f"{text[:head]}\n...<omitted {omitted} chars>...\n{text[-tail:]}"
+
+
+def micro_result_view(result: Any, source: dict[str, Any]) -> str:
+    """Compact tool_result view for L3 micro_compact without discarding GIS outputs or error roots."""
+    view: dict[str, Any] = {"micro_compacted": True, "source": source}
+    if isinstance(result, dict):
+        for key in (
+            "ok", "returncode", "status", "algorithm_id", "path",
+            "stdout_path", "stderr_path", "timed_out", "ready", "candidate_id",
+        ):
+            if key in result:
+                view[key] = result[key]
+        outputs = result.get("outputs")
+        if isinstance(outputs, list) and outputs:
+            paths = [
+                item["path"] if isinstance(item, dict) and isinstance(item.get("path"), str) else str(item)
+                for item in outputs
+            ]
+            dirs = [os.path.dirname(p) for p in paths]
+            root = ""
+            if len(paths) >= 2 and all(dirs):
+                try:
+                    root = os.path.commonpath(dirs)
+                except ValueError:
+                    root = ""
+            if root:
+                view["outputs_root"] = root
+                view["output_files"] = [os.path.relpath(p, root) for p in paths]
+            else:
+                view["output_files"] = paths
+        if result.get("ok") is False or result.get("stderr") or result.get("error"):
+            if isinstance(result.get("error"), str) and result["error"]:
+                view["error"] = _head_tail(result["error"], 200, 300)
+            if isinstance(result.get("stderr"), str) and result["stderr"]:
+                view["stderr"] = _head_tail(result["stderr"], 200, 300)
+    elif isinstance(result, str) and result:
+        view["preview"] = _head_tail(result, 200, 300)
+    return json_text(view)
+
+
 def result_view(result: Any, limit: int, source: dict[str, Any]) -> str:
     text = json_text(result)
     if len(text) <= limit:
@@ -176,7 +221,49 @@ class SessionStore:
             message["content"] = result_view(result, limit, {"path": str(path)})
         return message
 
-    def project(self, messages: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    def _tool_value_and_source(self, message: dict[str, Any], index: int) -> tuple[Any, dict[str, Any]]:
+        if "asset" in message:
+            path = self.asset_path(message["asset"])
+            data = path.read_bytes()
+            expected = message["asset"].get("sha256")
+            if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+                raise ValueError(f"工具结果资产校验失败：{path}")
+            return json.loads(data), {"path": str(path)}
+        source = {"path": str(self.path), "message_index": index}
+        raw = message.get("content", "")
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw), source
+            except json.JSONDecodeError:
+                return raw, source
+        return raw, source
+
+    def estimate_micro_reclaim(self, messages: list[dict[str, Any]], start: int, end: int) -> int:
+        names = {
+            call["id"]: call["function"]["name"]
+            for message in messages[: max(0, end)]
+            for call in message.get("tool_calls", [])
+        }
+        reclaim = 0
+        for index in range(max(0, start), min(len(messages), end)):
+            message = messages[index]
+            if message["role"] != "tool":
+                continue
+            name = names.get(message.get("tool_call_id"), message.get("tool_name"))
+            if name in CONTROL_TOOLS:
+                continue
+            orig_content = message.get("content", "")
+            if not isinstance(orig_content, str):
+                continue
+            value, source = self._tool_value_and_source(message, index)
+            folded = micro_result_view(value, source)
+            if len(folded) < len(orig_content):
+                reclaim += len(orig_content) - len(folded)
+        return reclaim
+
+    def project(
+        self, messages: list[dict[str, Any]], limit: int, *, micro_before: int = 0,
+    ) -> list[dict[str, Any]]:
         projected = []
         names = {}
         for index, message in enumerate(messages):
@@ -189,17 +276,14 @@ class SessionStore:
             }
             if message["role"] == "tool":
                 name = names.get(message["tool_call_id"], message.get("tool_name"))
-                if "asset" in message or (name not in CONTROL_TOOLS and len(item["content"]) > limit):
-                    source = {"path": str(self.path), "message_index": index}
-                    value = json.loads(item['content'])
-                    if "asset" in message:
-                        path = self.asset_path(message['asset'])
-                        source = {"path": str(path)}
-                        data = path.read_bytes()
-                        expected = message["asset"].get("sha256")
-                        if expected is not None and hashlib.sha256(data).hexdigest() != expected:
-                            raise ValueError(f"工具结果资产校验失败：{path}")
-                        value = json.loads(data)
+                if index < micro_before and name not in CONTROL_TOOLS:
+                    value, source = self._tool_value_and_source(message, index)
+                    folded = micro_result_view(value, source)
+                    if isinstance(item.get("content"), str) and len(folded) < len(item["content"]):
+                        item["content"] = folded
+                    item.pop("images", None)
+                elif "asset" in message or (name not in CONTROL_TOOLS and len(item["content"]) > limit):
+                    value, source = self._tool_value_and_source(message, index)
                     item["content"] = result_view(value, limit, source)
             projected.append(item)
         return projected

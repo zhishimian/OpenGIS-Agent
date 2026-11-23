@@ -15,7 +15,7 @@ from gis_agent.core.context import ContextLimit, ContextManager
 from gis_agent.core.events import EventCallback, emit_event
 from gis_agent.core.loop import AgentLoopRunner
 from gis_agent.core.memory import MemoryStore, MemoryTurn, extract_memories
-from gis_agent.core.model import ModelReply
+from gis_agent.core.model import ModelError, ModelReply
 from gis_agent.core.planning import Plan
 from gis_agent.persistence.evidence import tool_result
 from gis_agent.persistence.executions import ExecutionHistory, execution_id, record_history
@@ -33,6 +33,21 @@ PASSIVE_TOOLS = {
     "list_files", "read_file", "search_text", "inspect_data", "summarize_fields",
     "check_spatial_relation", "read_image", "search_qgis_tools", "calculate_distance",
 }
+MAX_REACTIVE_RETRIES = 2
+
+
+def _is_context_length_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(
+        token in text
+        for token in (
+            "prompt_too_long",
+            "too many tokens",
+            "context_length_exceeded",
+            "maximum context length",
+            "context length",
+        )
+    )
 
 
 class RunState(TypedDict):
@@ -72,6 +87,8 @@ class Agent:
     runtime_capabilities: dict[str, Any] | None = None
     graph: AgentLoopRunner = field(init=False, repr=False)
     messages: list[dict[str, Any]] = field(init=False, repr=False)
+    _step_completed_since_prepare: bool = field(default=False, init=False, repr=False)
+    _reactive_consecutive_failures: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.memory is not None and self.memory_turn is None:
@@ -232,10 +249,17 @@ class Agent:
             business["answer_to_request"] = latest["in_reply_to"]
         try:
             request = self.context.prepare(
-                self.instructions, self.messages, business, self.available(state), state["background"]
+                self.instructions,
+                self.messages,
+                business,
+                self.available(state),
+                state["background"],
+                step_completed=self._step_completed_since_prepare,
             )
         except (ContextLimit, AuxiliaryError) as error:
+            self._step_completed_since_prepare = False
             return {"outcome": {"ok": False, "status": "blocked", "summary": str(error)}}
+        self._step_completed_since_prepare = False
         if self._is_cancelled():
             return {
                 "outcome": {
@@ -245,7 +269,49 @@ class Agent:
                 },
                 "record_hash": self.record_hash(),
             }
-        reply = self.chat(request.messages, request.schemas)
+        reply: ModelReply | None = None
+        for attempt in range(MAX_REACTIVE_RETRIES + 1):
+            try:
+                reply = self.chat(request.messages, request.schemas)
+                self._reactive_consecutive_failures = 0
+                break
+            except ModelError as error:
+                if not _is_context_length_error(error):
+                    raise
+                self._reactive_consecutive_failures += 1
+                if attempt >= MAX_REACTIVE_RETRIES or self._reactive_consecutive_failures > 3:
+                    return {
+                        "outcome": {
+                            "ok": False,
+                            "status": "blocked",
+                            "summary": f"上下文超限且两级自愈压缩未恢复：{error}",
+                        }
+                    }
+                recent = self.context.config.recent_batches if attempt == 0 else 0
+                tool_preview = None if attempt == 0 else min(self.context.config.tool_limit, 2000)
+                logger.warning("触发第 %s 级 reactive_compact 自愈：%s", attempt + 1, error)
+                try:
+                    request = self.context.prepare(
+                        self.instructions,
+                        self.messages,
+                        business,
+                        self.available(state),
+                        state["background"],
+                        force_compact_recent_batches=recent,
+                        preview_tool_limit=tool_preview,
+                    )
+                except (ContextLimit, AuxiliaryError) as compact_error:
+                    return {
+                        "outcome": {
+                            "ok": False,
+                            "status": "blocked",
+                            "summary": f"上下文超限后自愈压缩失败：{compact_error}",
+                        }
+                    }
+        assert reply is not None
+        prompt_tokens = (reply.usage or {}).get("prompt_tokens")
+        if isinstance(prompt_tokens, int):
+            self.context.record_prompt_usage(prompt_tokens, len(self.messages))
         self.store.record_model_call({"purpose": "main", **reply.metadata()})
         emit_event(
             self.on_event, "model_replied", self.store.session_id,
@@ -324,6 +390,11 @@ class Agent:
                             )
                         if name not in PASSIVE_TOOLS:
                             state["execution_started"] = True
+                        before_completed = (
+                            {s["content"] for s in self.plan.steps if s["status"] == "completed"}
+                            if name == "update_plan"
+                            else set()
+                        )
                         started = perf_counter()
                         try:
                             result = self.registry.execute(name, arguments)
@@ -332,6 +403,10 @@ class Agent:
                                 record_history(self.history.raised, identifier, error, (perf_counter() - started) * 1000)
                             raise
                         elapsed_ms = (perf_counter() - started) * 1000
+                        if name == "update_plan" and isinstance(result, dict) and result.get("ok") is True:
+                            after_completed = {s["content"] for s in self.plan.steps if s["status"] == "completed"}
+                            if after_completed - before_completed:
+                                self._step_completed_since_prepare = True
                         if name == "search_qgis_tools" and isinstance(result, list) and self.load_qgis_tool is not None:
                             algorithms = list(state["algorithms"])
                             for item in result:
