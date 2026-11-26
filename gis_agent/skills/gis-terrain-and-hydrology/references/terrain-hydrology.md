@@ -24,3 +24,8 @@ Flood or reservoir storage volume below a water level `H` cannot be computed by 
 ## Runnable counterexamples and bilinear checks
 
 For bilinear sampling near borders or invalid cells, bounds-check indices and mask stencils whenever any required nonzero-weight neighbor is invalid; do not silently clamp out-of-bounds indices. Run [terrain_counterexamples.py](../scripts/terrain_counterexamples.py) and [hydrology_routing.py](../scripts/hydrology_routing.py) in either Tier A or Tier B Python. See also [validation_split.py](../../gis-verification/scripts/validation_split.py).
+
+## Coastal/Zero-Value Masking & Snapping Discipline
+- **Ocean/background zero masking**: Before running neighborhood terrain indices (TPI/TRI) or sink filling near coastlines or large reservoirs, verify whether `0 m` cells coincide with permanent water/ocean masks and exclude them so flat sea pixels do not bias land edge relief or create spurious artificial sink depths.
+- **Unfilled engineering terrain**: Even small sink-fill adjustments (`0.2–1.0 m` in narrow valley beds) can drop structures just meeting minimum elevation-difference thresholds below cutoff; keep `dem_filled` decoupled from crest/bed/slope/cut-fill geometry.
+- **Local vs global snapping fallback**: Noisy field coordinates should not trigger a blanket fallback from snapped pour points to un-snapped pixel-by-pixel D8 tracing, which systematically routes into minor hillslope rills instead of trunk channels. Inspect search radius and channel-initiation threshold around failing points first.

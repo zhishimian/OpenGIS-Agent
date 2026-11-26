@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 from collections.abc import Callable
@@ -48,3 +49,32 @@ class AuxiliaryCalls:
             return json.loads(reply.message.get("content") or "")
         except json.JSONDecodeError as error:
             raise AuxiliaryError(f"{purpose} 返回的 JSON 无效：{error}") from error
+
+    def ask_text(
+        self, purpose: str, instructions: str, data: Any, *, max_tokens: int | None = None,
+    ) -> str:
+        messages = [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": data if isinstance(data, str) else json_text(data)},
+        ]
+        if self.count_tokens(messages, []) > self.token_limit:
+            raise AuxiliaryError(f"{purpose} 输入超过 token 预算。")
+        self.used += 1
+        kwargs: dict[str, Any] = {}
+        if max_tokens is not None:
+            params = inspect.signature(self.chat).parameters
+            if "max_tokens" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["max_tokens"] = max_tokens
+        try:
+            reply = self.chat(messages, [], **kwargs)
+        except ModelError as error:
+            self.record({"purpose": purpose, "attempt": self.used, "error": str(error), "usage": None})
+            raise AuxiliaryError(f"{purpose}: {error}") from error
+        self.record({"purpose": purpose, "attempt": self.used, **reply.metadata(), "message": reply.message})
+        logger.info("Auxiliary: %s %s %s", purpose, self.used, reply.metadata())
+        if reply.finish_reason not in {"stop", "length"} or reply.message.get("tool_calls"):
+            raise AuxiliaryError(f"{purpose} 没有返回完整的普通响应。")
+        text = (reply.message.get("content") or "").strip()
+        if not text:
+            raise AuxiliaryError(f"{purpose} 返回正文为空。")
+        return text

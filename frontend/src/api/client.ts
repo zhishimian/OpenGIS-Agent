@@ -1,5 +1,6 @@
 import type {
   EnvInfo,
+  StudioPreferences,
   ExecutionRow,
   FigureItem,
   IdentifyResult,
@@ -106,6 +107,8 @@ export const api = {
         ...(dir ? { dir } : {}),
       }).toString()}`
     ),
+  savePreferences: (preferences: StudioPreferences) =>
+    apiFetch<StudioPreferences>("/api/settings/preferences", { method: "PUT", body: JSON.stringify(preferences) }),
   saveCredentials: (payload: { api_key?: string; provider?: string; model?: string; base_url?: string }) =>
     apiFetch("/api/settings/credentials", { method: "POST", body: JSON.stringify(payload) }),
   saveQgis: (qgis_dir: string | null) =>
@@ -138,7 +141,13 @@ export const api = {
     apiFetch<any>(`/api/spatial/layer-meta?${new URLSearchParams({ path }).toString()}`),
   getVectorGeojson: (
     path: string,
-    opts: { bbox?: [number, number, number, number]; zoom?: number; max_features?: number } = {}
+    opts: {
+      bbox?: [number, number, number, number];
+      zoom?: number;
+      max_features?: number;
+      fids?: number[];
+      signal?: AbortSignal;
+    } = {}
   ) =>
     apiFetch<any>(
       `/api/spatial/vector?${new URLSearchParams({
@@ -146,7 +155,9 @@ export const api = {
         ...(opts.bbox ? { bbox: opts.bbox.join(",") } : {}),
         ...(opts.zoom !== undefined ? { zoom: String(opts.zoom) } : {}),
         ...(opts.max_features !== undefined ? { max_features: String(opts.max_features) } : {}),
-      }).toString()}`
+        ...(opts.fids && opts.fids.length ? { fids: opts.fids.join(",") } : {}),
+      }).toString()}`,
+      { signal: opts.signal }
     ),
   identify: (payload: { lon: number; lat: number; zoom: number; layers: Array<{ path: string; type: string }> }) =>
     apiFetch<IdentifyResult>("/api/spatial/identify", {
@@ -170,10 +181,10 @@ export const api = {
     ),
   listFigures: (sessionId: string) =>
     apiFetch<{ session_id: string; figures: FigureItem[] }>(`/api/figures/${encodeURIComponent(sessionId)}`),
-  getExecutions: (sessionId: string, executionId?: string, section = "summary") =>
-    apiFetch<{ ok: boolean; items?: ExecutionRow[]; text?: string }>(
+  getExecutions: (sessionId: string, executionId?: string, section = "summary", cursor = 0) =>
+    apiFetch<{ ok: boolean; items?: ExecutionRow[]; text?: string; error?: string; next_cursor?: number | null }>(
       `/api/executions/${encodeURIComponent(sessionId)}?${new URLSearchParams({
-        ...(executionId ? { execution_id: executionId, section } : {}),
+        ...(executionId ? { execution_id: executionId, section, cursor: String(cursor) } : {}),
       }).toString()}`
     ),
   revealOrOpen: async (path: string, action: "reveal" | "open" = "reveal") => {

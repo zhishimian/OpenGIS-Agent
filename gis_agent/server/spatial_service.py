@@ -21,24 +21,225 @@ def _split_uri(raw_path: str) -> tuple[Path, str | None]:
     return Path(raw_path).expanduser().resolve(), None
 
 
+def _is_valid_wgs84_bounds(bounds: list[float] | None) -> bool:
+    if not bounds or len(bounds) != 4:
+        return False
+    try:
+        w, s, e, n = (float(v) for v in bounds)
+    except (TypeError, ValueError):
+        return False
+    if not all(math.isfinite(v) for v in (w, s, e, n)):
+        return False
+    if w == 0.0 and s == 0.0 and e == 0.0 and n == 0.0:
+        return False
+    return -180.5 <= w <= e <= 180.5 and -90.5 <= s <= n <= 90.5
+
+
 def _to_wgs84_bounds(crs_str: str | None, extent: list[float]) -> list[float] | None:
     if not extent or len(extent) != 4 or any(not math.isfinite(v) for v in extent):
         return None
     if not crs_str or crs_str.upper() in {"EPSG:4326", "OGC:CRS84", "CRS:84"}:
-        return [float(v) for v in extent]
+        cand = [float(v) for v in extent]
+        return cand if _is_valid_wgs84_bounds(cand) else None
     from pyproj import CRS, Transformer
 
     try:
         src = CRS.from_user_input(crs_str)
         if src.is_geographic and src.to_epsg() == 4326:
-            return [float(v) for v in extent]
+            cand = [float(v) for v in extent]
+            return cand if _is_valid_wgs84_bounds(cand) else None
         transformer = Transformer.from_crs(src, "EPSG:4326", always_xy=True)
         w, s, e, n = transformer.transform_bounds(*extent, densify_pts=21)
         if all(math.isfinite(v) for v in (w, s, e, n)):
-            return [round(float(w), 6), round(float(s), 6), round(float(e), 6), round(float(n), 6)]
+            cand = [round(float(w), 6), round(float(s), 6), round(float(e), 6), round(float(n), 6)]
+            return cand if _is_valid_wgs84_bounds(cand) else None
     except Exception:
         return None
     return None
+
+
+CSV_LON_CANDIDATES = ("lon", "lng", "longitude", "long", "x", "jd", "经度")
+CSV_LAT_CANDIDATES = ("lat", "latitude", "y", "wd", "纬度")
+MAX_CSV_PREVIEW_ROWS = 50_000
+
+
+def _read_csv_df(file_path: Path, *, nrows: int | None = None):
+    import pandas as pd
+
+    for enc in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return pd.read_csv(file_path, nrows=nrows, encoding=enc)
+        except UnicodeDecodeError:
+            continue
+    return pd.read_csv(file_path, nrows=nrows, encoding="utf-8", encoding_errors="replace")
+
+
+def _detect_csv_lon_lat(fieldnames: list[str]) -> tuple[str | None, str | None]:
+    lower_map = {str(col).strip().lower(): str(col) for col in fieldnames}
+    lon_col = next((lower_map[c] for c in CSV_LON_CANDIDATES if c in lower_map), None)
+    lat_col = next((lower_map[c] for c in CSV_LAT_CANDIDATES if c in lower_map), None)
+    return lon_col, lat_col
+
+
+def _inspect_csv(file_path: Path) -> dict[str, Any]:
+    import numpy as np
+    import pandas as pd
+
+    df = _read_csv_df(file_path, nrows=MAX_CSV_PREVIEW_ROWS + 1)
+    truncated_csv = len(df) > MAX_CSV_PREVIEW_ROWS
+    if truncated_csv:
+        df = df.iloc[:MAX_CSV_PREVIEW_ROWS]
+    fields = [{"name": str(c), "type": str(df[c].dtype)} for c in df.columns]
+    lon_col, lat_col = _detect_csv_lon_lat([str(c) for c in df.columns])
+    if not lon_col or not lat_col:
+        return {
+            "kind": "table",
+            "source": str(file_path),
+            "feature_count": int(len(df)),
+            "fields": fields,
+            "warnings": ["no_spatial_columns"],
+        }
+
+    lons = pd.to_numeric(df[lon_col], errors="coerce")
+    lats = pd.to_numeric(df[lat_col], errors="coerce")
+    valid_mask = (
+        lons.notna()
+        & lats.notna()
+        & np.isfinite(lons)
+        & np.isfinite(lats)
+        & lons.between(-180.0, 180.0)
+        & lats.between(-90.0, 90.0)
+    )
+    valid_count = int(valid_mask.sum())
+    if len(df) > 0 and valid_count == 0:
+        return {
+            "kind": "table",
+            "source": str(file_path),
+            "feature_count": int(len(df)),
+            "fields": fields,
+            "warnings": ["no_spatial_columns"],
+        }
+
+    warnings: list[str] = []
+    bbox: list[float] | None = None
+    if valid_count == 0:
+        warnings.append("empty_features")
+    else:
+        cand = [
+            round(float(lons[valid_mask].min()), 6),
+            round(float(lats[valid_mask].min()), 6),
+            round(float(lons[valid_mask].max()), 6),
+            round(float(lats[valid_mask].max()), 6),
+        ]
+        bbox = cand if _is_valid_wgs84_bounds(cand) else None
+    if truncated_csv:
+        warnings.append("csv_preview_truncated")
+    return {
+        "kind": "vector",
+        "source": str(file_path),
+        "feature_count": valid_count,
+        "geometry_type": "Point",
+        "crs": "EPSG:4326",
+        "fields": fields,
+        "bbox_wgs84": bbox,
+        "warnings": warnings,
+        "is_csv_points": True,
+        "lon_col": lon_col,
+        "lat_col": lat_col,
+    }
+
+
+def _read_csv_geojson(
+    file_path: Path,
+    *,
+    bbox: tuple[float, float, float, float] | None = None,
+    max_features: int = 5000,
+    fids: list[int] | None = None,
+    fields: list[str] | None = None,
+) -> dict[str, Any]:
+    import numpy as np
+    import pandas as pd
+
+    df = _read_csv_df(file_path, nrows=MAX_CSV_PREVIEW_ROWS)
+    all_fields = [str(c) for c in df.columns]
+    lon_col, lat_col = _detect_csv_lon_lat(all_fields)
+    if not lon_col or not lat_col:
+        raise ValueError("该 CSV 不包含可识别的经纬度坐标列")
+
+    df = df.copy()
+    df["_fid"] = df.index.astype(int)
+    lons = pd.to_numeric(df[lon_col], errors="coerce")
+    lats = pd.to_numeric(df[lat_col], errors="coerce")
+    valid_mask = (
+        lons.notna()
+        & lats.notna()
+        & np.isfinite(lons)
+        & np.isfinite(lats)
+        & lons.between(-180.0, 180.0)
+        & lats.between(-90.0, 90.0)
+    )
+    df["_lon"] = lons
+    df["_lat"] = lats
+    valid_df = df.loc[valid_mask]
+    total_features = int(len(valid_df))
+
+    if fids:
+        clean_fids = set(int(x) for x in fids[:200])
+        view_df = valid_df.loc[valid_df["_fid"].isin(clean_fids)]
+        truncated = False
+    else:
+        view_df = valid_df
+        if bbox is not None:
+            w, s, e, n = bbox
+            view_df = view_df.loc[view_df["_lon"].between(w, e) & view_df["_lat"].between(s, n)]
+        limit = max(100, min(int(max_features), 20000))
+        truncated = len(view_df) > limit
+        if truncated:
+            view_df = view_df.iloc[:limit]
+
+    use_fields = [f for f in fields if f in all_fields] if fields is not None else all_fields[:24]
+    features: list[dict[str, Any]] = []
+    for rec in view_df.to_dict(orient="records"):
+        lon_v = round(float(rec["_lon"]), 6)
+        lat_v = round(float(rec["_lat"]), 6)
+        props = _json_safe_row({k: rec.get(k) for k in use_fields})
+        props["_fid"] = int(rec["_fid"])
+        features.append({
+            "type": "Feature",
+            "properties": props,
+            "geometry": {"type": "Point", "coordinates": [lon_v, lat_v]},
+        })
+
+    bounds = None
+    if len(view_df):
+        cand = [
+            round(float(view_df["_lon"].min()), 6),
+            round(float(view_df["_lat"].min()), 6),
+            round(float(view_df["_lon"].max()), 6),
+            round(float(view_df["_lat"].max()), 6),
+        ]
+        bounds = cand if _is_valid_wgs84_bounds(cand) else None
+
+    warnings: list[str] = []
+    if total_features == 0:
+        warnings.append("empty_features")
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "meta": {
+            "path": str(file_path),
+            "layer": None,
+            "crs": "EPSG:4326",
+            "geometry_type": "Point",
+            "fields": all_fields,
+            "total_features": total_features,
+            "returned_features": len(features),
+            "truncated": bool(truncated or (bbox is not None and total_features > len(features) and not fids)),
+            "simplified_tol_deg": 0.0,
+            "bbox_wgs84": bounds,
+            "warnings": warnings,
+        },
+    }
 
 
 def _json_safe_row(row_dict: dict[str, Any]) -> dict[str, Any]:
@@ -87,10 +288,18 @@ class SpatialService:
     def get_layer_meta(self, authorized_uri: str) -> dict[str, Any]:
         file_path, _layer = _split_uri(authorized_uri)
         ext = file_path.suffix.lower()
+        if ext == ".csv":
+            return _inspect_csv(file_path)
         if ext in {".tif", ".tiff", ".img", ".vrt", ".asc", ".nc"}:
             info = _inspect_raster_rasterio(authorized_uri)
             if info.get("kind") == "raster":
                 info["bbox_wgs84"] = _to_wgs84_bounds(info.get("crs"), info.get("extent", []))
+                warnings: list[str] = []
+                if not info.get("crs"):
+                    warnings.append("missing_crs")
+                if info.get("extent") and info["bbox_wgs84"] is None:
+                    warnings.append("invalid_bounds")
+                info["warnings"] = warnings
             return info
 
         info = _inspect_vector_pyogrio(authorized_uri)
@@ -105,7 +314,16 @@ class SpatialService:
                     pass
             return info
 
-        info["bbox_wgs84"] = _to_wgs84_bounds(info.get("crs"), info.get("extent", []))
+        feature_count = int(info.get("feature_count") or 0)
+        info["bbox_wgs84"] = None if feature_count == 0 else _to_wgs84_bounds(info.get("crs"), info.get("extent", []))
+        vec_warnings: list[str] = []
+        if feature_count == 0:
+            vec_warnings.append("empty_features")
+        if not info.get("crs"):
+            vec_warnings.append("missing_crs")
+        if feature_count > 0 and info.get("extent") and info["bbox_wgs84"] is None:
+            vec_warnings.append("invalid_bounds")
+        info["warnings"] = vec_warnings
         return info
 
     def get_vector_geojson(
@@ -117,12 +335,16 @@ class SpatialService:
         max_features: int = 5000,
         simplify_tol: float | None = None,
         fields: list[str] | None = None,
+        fids: list[int] | None = None,
     ) -> dict[str, Any]:
         import json
         import pyogrio
         from pyproj import CRS, Transformer
 
         file_path, layer_name = _split_uri(authorized_uri)
+        if file_path.suffix.lower() == ".csv":
+            return _read_csv_geojson(file_path, bbox=bbox, max_features=max_features, fids=fids, fields=fields)
+
         info = pyogrio.read_info(str(file_path), layer=layer_name)
         total_features = int(info.get("features") or 0)
         raw_crs = info.get("crs")
@@ -133,33 +355,62 @@ class SpatialService:
         use_fields = [f for f in fields if f in all_fields] if fields is not None else all_fields[:24]
 
         query_bbox = None
-        if bbox is not None:
+        if bbox is not None and not fids:
             if src_crs is not None and not (src_crs.is_geographic and src_crs.to_epsg() == 4326):
                 tr = Transformer.from_crs("EPSG:4326", src_crs, always_xy=True)
                 query_bbox = tr.transform_bounds(*bbox, densify_pts=12)
             else:
                 query_bbox = bbox
 
-        limit = max(100, min(int(max_features), 20000))
-        read_limit = limit if (total_features > limit or query_bbox is not None) else None
-        gdf = pyogrio.read_dataframe(
-            str(file_path),
-            layer=layer_name,
-            columns=use_fields,
-            bbox=query_bbox,
-            max_features=read_limit + 1 if read_limit is not None else None,
-            fid_as_index=True,
-        )
-        truncated = read_limit is not None and len(gdf) > read_limit
-        if truncated:
-            gdf = gdf.iloc[:read_limit]
+        if fids:
+            clean_fids = list(dict.fromkeys(int(x) for x in fids))[:200]
+            try:
+                gdf = pyogrio.read_dataframe(
+                    str(file_path),
+                    layer=layer_name,
+                    columns=use_fields,
+                    fids=clean_fids,
+                    fid_as_index=True,
+                )
+            except Exception:
+                gdf = pyogrio.read_dataframe(
+                    str(file_path),
+                    layer=layer_name,
+                    columns=use_fields,
+                    fid_as_index=True,
+                )
+                gdf = gdf.loc[gdf.index.isin(clean_fids)]
+            else:
+                if len(gdf) == 0 and total_features > 0:
+                    full_gdf = pyogrio.read_dataframe(
+                        str(file_path),
+                        layer=layer_name,
+                        columns=use_fields,
+                        fid_as_index=True,
+                    )
+                    gdf = full_gdf.loc[full_gdf.index.isin(clean_fids)]
+            truncated = False
+        else:
+            limit = max(100, min(int(max_features), 20000))
+            read_limit = limit if (total_features > limit or query_bbox is not None) else None
+            gdf = pyogrio.read_dataframe(
+                str(file_path),
+                layer=layer_name,
+                columns=use_fields,
+                bbox=query_bbox,
+                max_features=read_limit + 1 if read_limit is not None else None,
+                fid_as_index=True,
+            )
+            truncated = read_limit is not None and len(gdf) > read_limit
+            if truncated:
+                gdf = gdf.iloc[:read_limit]
 
         if gdf.crs is not None:
             if not (gdf.crs.is_geographic and gdf.crs.to_epsg() == 4326):
                 gdf = gdf.to_crs("EPSG:4326")
 
-        effective_tol = simplify_tol
-        if effective_tol is None and zoom is not None and (total_features > 1500 or len(gdf) > 1500):
+        effective_tol = None if fids else simplify_tol
+        if not fids and effective_tol is None and zoom is not None and (total_features > 1500 or len(gdf) > 1500):
             deg_per_px = 360.0 / (256.0 * (2.0 ** max(0.0, min(float(zoom), 20.0))))
             effective_tol = max(deg_per_px * 1.1, 1e-5)
 
@@ -178,11 +429,19 @@ class SpatialService:
         geojson_obj = json.loads(gdf.to_json(drop_id=True)) if len(gdf) else {"type": "FeatureCollection", "features": []}
         raw_tb = info.get("total_bounds")
         fallback_tb = [float(x) for x in raw_tb] if raw_tb is not None else []
-        bounds = (
+        raw_bounds = (
             [float(x) for x in gdf.total_bounds]
             if len(gdf)
             else _to_wgs84_bounds(src_crs.to_string() if src_crs else None, fallback_tb)
         )
+        bounds = raw_bounds if _is_valid_wgs84_bounds(raw_bounds) else None
+        warnings: list[str] = []
+        if total_features == 0:
+            warnings.append("empty_features")
+        if src_crs is None:
+            warnings.append("missing_crs")
+        if total_features > 0 and raw_bounds is not None and bounds is None:
+            warnings.append("invalid_bounds")
         geojson_obj["meta"] = {
             "path": str(file_path),
             "layer": layer_name,
@@ -191,9 +450,10 @@ class SpatialService:
             "fields": all_fields,
             "total_features": total_features,
             "returned_features": len(geojson_obj.get("features", [])),
-            "truncated": bool(truncated or (total_features > len(gdf) and query_bbox is not None)),
+            "truncated": bool((not fids) and (truncated or (total_features > len(gdf) and query_bbox is not None))),
             "simplified_tol_deg": float(effective_tol) if effective_tol else 0.0,
             "bbox_wgs84": bounds,
+            "warnings": warnings,
         }
         return geojson_obj
 
@@ -427,25 +687,49 @@ class SpatialService:
         import pyogrio
 
         file_path, layer_name = _split_uri(authorized_uri)
-        info = pyogrio.read_info(str(file_path), layer=layer_name)
-        raw_fields = info.get("fields")
-        all_fields = [str(f) for f in raw_fields] if raw_fields is not None else []
-        gdf = pyogrio.read_dataframe(str(file_path), layer=layer_name, fid_as_index=True)
-        if gdf.crs is not None and not (gdf.crs.is_geographic and gdf.crs.to_epsg() == 4326):
-            gdf = gdf.to_crs("EPSG:4326")
-
-        df = pd.DataFrame(gdf.drop(columns=[gdf.geometry.name], errors="ignore"))
-        df["_fid"] = gdf.index.astype(int)
-        if len(gdf) and gdf.geometry.name in gdf.columns:
-            b = gdf.geometry.bounds
-            df["_bbox_wgs84"] = [
-                [round(float(r.minx), 6), round(float(r.miny), 6), round(float(r.maxx), 6), round(float(r.maxy), 6)]
-                if all(math.isfinite(x) for x in (r.minx, r.miny, r.maxx, r.maxy))
-                else None
-                for r in b.itertuples(index=False)
-            ]
+        if file_path.suffix.lower() == ".csv":
+            df = _read_csv_df(file_path, nrows=MAX_CSV_PREVIEW_ROWS).copy()
+            all_fields = [str(c) for c in df.columns]
+            lon_col, lat_col = _detect_csv_lon_lat(all_fields)
+            df["_fid"] = df.index.astype(int)
+            if lon_col and lat_col:
+                lons = pd.to_numeric(df[lon_col], errors="coerce")
+                lats = pd.to_numeric(df[lat_col], errors="coerce")
+                df["_bbox_wgs84"] = [
+                    [round(float(x), 6), round(float(y), 6), round(float(x), 6), round(float(y), 6)]
+                    if (
+                        x is not None
+                        and y is not None
+                        and math.isfinite(float(x))
+                        and math.isfinite(float(y))
+                        and -180.0 <= float(x) <= 180.0
+                        and -90.0 <= float(y) <= 90.0
+                    )
+                    else None
+                    for x, y in zip(lons, lats)
+                ]
+            else:
+                df["_bbox_wgs84"] = None
         else:
-            df["_bbox_wgs84"] = None
+            info = pyogrio.read_info(str(file_path), layer=layer_name)
+            raw_fields = info.get("fields")
+            all_fields = [str(f) for f in raw_fields] if raw_fields is not None else []
+            gdf = pyogrio.read_dataframe(str(file_path), layer=layer_name, fid_as_index=True)
+            if gdf.crs is not None and not (gdf.crs.is_geographic and gdf.crs.to_epsg() == 4326):
+                gdf = gdf.to_crs("EPSG:4326")
+
+            df = pd.DataFrame(gdf.drop(columns=[gdf.geometry.name], errors="ignore"))
+            df["_fid"] = gdf.index.astype(int)
+            if len(gdf) and gdf.geometry.name in gdf.columns:
+                b = gdf.geometry.bounds
+                df["_bbox_wgs84"] = [
+                    [round(float(r.minx), 6), round(float(r.miny), 6), round(float(r.maxx), 6), round(float(r.maxy), 6)]
+                    if all(math.isfinite(x) for x in (r.minx, r.miny, r.maxx, r.maxy))
+                    else None
+                    for r in b.itertuples(index=False)
+                ]
+            else:
+                df["_bbox_wgs84"] = None
 
         stats_summary: dict[str, Any] | None = None
         if stats_field and stats_field in df.columns:

@@ -33,6 +33,8 @@ class WorkspaceContext:
     figure_annotations: tuple[dict[str, Any], ...] = ()
     execution_policy: ExecutionPolicy = "auto"
 
+    cartography_preferences: dict[str, str] | None = None
+
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {}
         if self.selected_layers:
@@ -55,4 +57,6 @@ class WorkspaceContext:
             payload["figure_annotations"] = list(self.figure_annotations)
         if self.execution_policy != "auto":
             payload["execution_policy"] = self.execution_policy
+        if self.cartography_preferences:
+            payload["cartography_preferences"] = self.cartography_preferences
         return payload

@@ -2,6 +2,7 @@ export type ExecutionPolicy = "auto" | "plan_first" | "step_review";
 export type WorkspaceTab = "map" | "figures" | "code";
 export type MapToolMode = "pan" | "identify" | "bbox" | "polygon" | "select_fid";
 export type BasemapKind = "offline" | "positron" | "dark" | "osm";
+export type LayerRole = "result" | "intermediate" | "input";
 
 export interface PlanStep {
   content: string;
@@ -40,7 +41,16 @@ export interface UsageStats {
   estimated_cny: number;
 }
 
+export interface StudioPreferences {
+  north_style: "compass_star" | "sleek_needle" | "chevron" | "line_arrow";
+  scale_style: "cartographic" | "ticked" | "double_box";
+  label_language: "随任务" | "中文" | "英文" | "中英双语";
+  basemap: BasemapKind;
+  execution_policy: ExecutionPolicy;
+}
+
 export interface EnvInfo {
+  preferences: StudioPreferences | null;
   project_dir: string;
   has_qgis: boolean;
   qgis_dir: string | null;
@@ -74,6 +84,7 @@ export interface WorkspaceFileItem {
 }
 
 export interface SessionSummary {
+  title?: string;
   session_id: string;
   busy: boolean;
   waiting: boolean;
@@ -127,6 +138,9 @@ export interface LayerItem {
   path: string;
   name: string;
   kind: "vector" | "raster";
+  role: LayerRole;
+  sourceTool?: string;
+  userTouchedVisible?: boolean;
   visible: boolean;
   opacity: number;
   color: string;
@@ -137,16 +151,42 @@ export interface LayerItem {
   bandCount: number;
   colormap: string;
   bboxWgs84: [number, number, number, number] | null;
+  fullBboxWgs84: [number, number, number, number] | null;
   fields: string[];
   geometryType?: string;
   totalFeatures?: number;
   truncated?: boolean;
+  viewportLoading?: boolean;
+  viewportReturned?: number;
+  warnings?: string[];
   geojson?: GeoJsonFeatureCollection;
   rasterBounds?: [number, number, number, number];
   rasterUrl?: string;
   stats?: { min?: number | null; max?: number | null; vmin?: number | null; vmax?: number | null };
   loading?: boolean;
   error?: string;
+}
+
+export interface HighlightedFeature {
+  path: string;
+  fid: number;
+  feature: Record<string, any> | null;
+}
+
+export interface PendingContainerSublayer {
+  name: string;
+  source: string;
+  geometry_type?: string;
+  feature_count?: number;
+  crs?: string;
+  bbox_wgs84?: [number, number, number, number] | null;
+}
+
+export interface PendingContainer {
+  path: string;
+  name: string;
+  role: LayerRole;
+  layers: PendingContainerSublayer[];
 }
 
 export interface ToolActivity {
@@ -179,6 +219,9 @@ export interface IdentifyResult {
 export interface ExecutionRow {
   execution_id: string;
   tool: string;
+  script?: string;
+  error?: string;
+  sources?: { assistant_index?: number; call_slot?: number };
   status: string;
   elapsed_ms?: number;
   script_snapshot?: string;

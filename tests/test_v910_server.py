@@ -371,3 +371,42 @@ def test_v910_figure_service_and_studio_cli(tmp_path: Path, monkeypatch: pytest.
     r = CliRunner().invoke(cli.app, ["studio", "--folder", str(project), "--no-browser", "--port", "8765"])
     assert r.exit_code == 0, r.output
     assert called and called[0]["project"] == project.resolve() and called[0]["port"] == 8765 and called[0]["open_browser"] is False
+
+
+def test_studio_preferences_persist_and_reach_turn_context(tmp_path: Path) -> None:
+    workspace = WorkspaceService(tmp_path, settings_path=tmp_path / "settings.json")
+    figures = FigureService()
+    manager = SessionManager(workspace, figures)
+    app = create_app(workspace, manager, SpatialService(), figures, token="test")
+    prefs = dict(north_style="line_arrow", scale_style="double_box", label_language="英文",
+                 execution_policy="plan_first", basemap="offline")
+    with TestClient(app, headers={"X-OpenGIS-Token": "test"}) as client:
+        assert workspace.preferences() is None
+        assert client.put("/api/settings/preferences", json=prefs).json() == prefs
+        invalid = dict(prefs, north_style="unknown")
+        assert client.put("/api/settings/preferences", json=invalid).status_code == 422
+        reopened = WorkspaceService(tmp_path, settings_path=workspace.settings_path)
+        assert reopened.preferences() == prefs
+        context = manager._build_workspace_context({"execution_policy": "auto"}, tmp_path)
+        assert context.execution_policy == "auto"
+        assert context.to_dict()["cartography_preferences"] == {
+            key: prefs[key] for key in ("north_style", "scale_style", "label_language")
+        }
+        assert manager._build_workspace_context(None, tmp_path).execution_policy == "plan_first"
+
+
+def test_studio_cartography_style_gallery() -> None:
+    from gis_agent.integrations.plotting import add_scalebar_and_north
+
+    fig, ax = plt.subplots()
+    try:
+        for north in ("compass_star", "sleek_needle", "chevron", "line_arrow"):
+            for scale in ("cartographic", "double_box", "ticked"):
+                ax.clear()
+                ax.set_xlim(0, 10000)
+                ax.set_ylim(0, 10000)
+                result = add_scalebar_and_north(ax, north_style=north, scale_style=scale)
+                assert result["north_style"] == north and result["scale_style"] == scale
+                fig.canvas.draw()
+    finally:
+        plt.close(fig)

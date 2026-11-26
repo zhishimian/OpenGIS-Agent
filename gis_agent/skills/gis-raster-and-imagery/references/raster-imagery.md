@@ -22,3 +22,8 @@ Never stack rasters with mismatched transforms, pixel sizes, or CRS by array sli
 ## Georeferencing credibility and checkpoints
 
 A CRS label or affine transform is a location hypothesis. Matching centers or forcing equal extents without correspondence points proves nothing. Separate fitting control points (GCPs) from independent evaluation checkpoints; record residuals in pixels and ground units alongside spatial coverage. Unverified visual alignments must stay marked `UNKNOWN`, and dependent zonal updates conditional. See [validation_split.py](../../gis-verification/scripts/validation_split.py) and [raster_align_index.py](../scripts/raster_align_index.py).
+
+## Multi-Temporal Maxima, Edge Resampling Bleed & Zonal Consistency
+- **Synchronous event window vs per-pixel rolling max**: When an analysis calls for peak cumulative precipitation/flux during a storm or event window across a region, verify whether each pixel must share the same global peak window `[t0, t0+W]` rather than taking independent per-pixel rolling maxima (which mixes asynchronous peaks and alters minimum/maximum bounds).
+- **Resampling boundary depression**: Continuous resampling (`bilinear`/`cubic`) near coarse-raster boundaries can blend partial footprints with masked neighbors or omit outer footprints if source grids were clipped too tightly; audit `raw_min`/`raw_max` before and after alignment.
+- **Consistent grid-sampling predicate**: Mixing fractional pixel-area overlap for continuous means and strict pixel-center point-in-polygon checks for local maxima produces incomplete edge slivers (`NaN` in some columns of the same grid cell while non-null in others). Standardize on one aggregation scheme per grid table.

@@ -24,7 +24,7 @@ import uvicorn
 from gis_agent.server.figure_service import FigureService
 from gis_agent.server.session_manager import SessionManager
 from gis_agent.server.spatial_service import SpatialService
-from gis_agent.server.workspace_service import WorkspaceService
+from gis_agent.server.workspace_service import StudioPreferences, WorkspaceService
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -207,6 +207,10 @@ def create_app(
     def list_workspace_files(dir: str | None = None, session_id: str | None = None) -> dict[str, Any]:
         return _guard_http(lambda: workspace.list_files(dir, session_id=session_id))
 
+    @app.put("/api/settings/preferences")
+    def save_preferences(req: StudioPreferences) -> dict[str, str]:
+        return workspace.save_preferences(req)
+
     @app.get("/api/settings/credentials")
     def get_credentials() -> dict[str, Any]:
         return workspace.credentials_status()
@@ -323,6 +327,7 @@ def create_app(
         max_features: int = 5000,
         simplify_tol: float | None = None,
         fields: str | None = None,
+        fids: str | None = None,
     ) -> dict[str, Any]:
         def run():
             uri = _auth_uri(path)
@@ -333,8 +338,20 @@ def create_app(
                     raise ValueError("bbox 必须为 4 个逗号分隔数值：west,south,east,north")
                 parsed_bbox = (parts[0], parts[1], parts[2], parts[3])
             parsed_fields = [f.strip() for f in fields.split(",") if f.strip()] if fields is not None else None
+            parsed_fids = None
+            if fids is not None and fids.strip():
+                try:
+                    parsed_fids = [int(x.strip()) for x in fids.split(",") if x.strip()][:200]
+                except ValueError as exc:
+                    raise ValueError("fids 必须为逗号分隔的整数列表") from exc
             return spatial.get_vector_geojson(
-                uri, bbox=parsed_bbox, zoom=zoom, max_features=max_features, simplify_tol=simplify_tol, fields=parsed_fields
+                uri,
+                bbox=parsed_bbox,
+                zoom=zoom,
+                max_features=max_features,
+                simplify_tol=simplify_tol,
+                fields=parsed_fields,
+                fids=parsed_fids,
             )
 
         return _guard_http(run)
@@ -437,8 +454,8 @@ def create_app(
         return {"session_id": session_id, "figures": figures.list_figures(output_dir)}
 
     @app.get("/api/executions/{session_id}")
-    def list_executions(session_id: str, execution_id: str | None = None, section: str = "summary") -> dict[str, Any]:
-        return _guard_http(lambda: manager.get_executions(session_id, execution_id=execution_id, section=section))
+    def list_executions(session_id: str, execution_id: str | None = None, section: str = "summary", cursor: int = 0) -> dict[str, Any]:
+        return _guard_http(lambda: manager.get_executions(session_id, execution_id=execution_id, section=section, cursor=cursor))
 
     @app.post("/api/os/reveal")
     def os_reveal(req: RevealReq) -> dict[str, Any]:

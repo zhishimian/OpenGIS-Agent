@@ -15,7 +15,7 @@ from gis_agent.core.context import ContextLimit, ContextManager
 from gis_agent.core.events import EventCallback, emit_event
 from gis_agent.core.loop import AgentLoopRunner
 from gis_agent.core.memory import MemoryStore, MemoryTurn, extract_memories
-from gis_agent.core.model import ModelReply
+from gis_agent.core.model import ModelError, ModelReply
 from gis_agent.core.planning import Plan
 from gis_agent.persistence.evidence import tool_result
 from gis_agent.persistence.executions import ExecutionHistory, execution_id, record_history
@@ -33,6 +33,21 @@ PASSIVE_TOOLS = {
     "list_files", "read_file", "search_text", "inspect_data", "summarize_fields",
     "check_spatial_relation", "read_image", "search_qgis_tools", "calculate_distance",
 }
+MAX_REACTIVE_RETRIES = 2
+
+
+def _is_context_length_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(
+        token in text
+        for token in (
+            "prompt_too_long",
+            "too many tokens",
+            "context_length_exceeded",
+            "maximum context length",
+            "context length",
+        )
+    )
 
 
 class RunState(TypedDict):
@@ -72,6 +87,8 @@ class Agent:
     runtime_capabilities: dict[str, Any] | None = None
     graph: AgentLoopRunner = field(init=False, repr=False)
     messages: list[dict[str, Any]] = field(init=False, repr=False)
+    _step_completed_since_prepare: bool = field(default=False, init=False, repr=False)
+    _reactive_consecutive_failures: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.memory is not None and self.memory_turn is None:
@@ -232,10 +249,17 @@ class Agent:
             business["answer_to_request"] = latest["in_reply_to"]
         try:
             request = self.context.prepare(
-                self.instructions, self.messages, business, self.available(state), state["background"]
+                self.instructions,
+                self.messages,
+                business,
+                self.available(state),
+                state["background"],
+                step_completed=self._step_completed_since_prepare,
             )
         except (ContextLimit, AuxiliaryError) as error:
+            self._step_completed_since_prepare = False
             return {"outcome": {"ok": False, "status": "blocked", "summary": str(error)}}
+        self._step_completed_since_prepare = False
         if self._is_cancelled():
             return {
                 "outcome": {
@@ -245,7 +269,49 @@ class Agent:
                 },
                 "record_hash": self.record_hash(),
             }
-        reply = self.chat(request.messages, request.schemas)
+        reply: ModelReply | None = None
+        for attempt in range(MAX_REACTIVE_RETRIES + 1):
+            try:
+                reply = self.chat(request.messages, request.schemas)
+                self._reactive_consecutive_failures = 0
+                break
+            except ModelError as error:
+                if not _is_context_length_error(error):
+                    raise
+                self._reactive_consecutive_failures += 1
+                if attempt >= MAX_REACTIVE_RETRIES or self._reactive_consecutive_failures > 3:
+                    return {
+                        "outcome": {
+                            "ok": False,
+                            "status": "blocked",
+                            "summary": f"上下文超限且两级自愈压缩未恢复：{error}",
+                        }
+                    }
+                recent = self.context.config.recent_batches if attempt == 0 else 0
+                tool_preview = None if attempt == 0 else min(self.context.config.tool_limit, 2000)
+                logger.warning("触发第 %s 级 reactive_compact 自愈：%s", attempt + 1, error)
+                try:
+                    request = self.context.prepare(
+                        self.instructions,
+                        self.messages,
+                        business,
+                        self.available(state),
+                        state["background"],
+                        force_compact_recent_batches=recent,
+                        preview_tool_limit=tool_preview,
+                    )
+                except (ContextLimit, AuxiliaryError) as compact_error:
+                    return {
+                        "outcome": {
+                            "ok": False,
+                            "status": "blocked",
+                            "summary": f"上下文超限后自愈压缩失败：{compact_error}",
+                        }
+                    }
+        assert reply is not None
+        prompt_tokens = (reply.usage or {}).get("prompt_tokens")
+        if isinstance(prompt_tokens, int):
+            self.context.record_prompt_usage(prompt_tokens, len(self.messages))
         self.store.record_model_call({"purpose": "main", **reply.metadata()})
         emit_event(
             self.on_event, "model_replied", self.store.session_id,
@@ -295,6 +361,9 @@ class Agent:
             name = call["function"]["name"]
             identifier = None
             elapsed_ms = 0.0
+            executed = False
+            tool_outputs: list[Any] = []
+            arguments: dict[str, Any] | None = None
             if self._is_cancelled():
                 result: Any = {"ok": False, "status": "cancelled", "cancelled": True, "error": "任务已中止，该调用未启动。"}
             else:
@@ -321,6 +390,11 @@ class Agent:
                             )
                         if name not in PASSIVE_TOOLS:
                             state["execution_started"] = True
+                        before_completed = (
+                            {s["content"] for s in self.plan.steps if s["status"] == "completed"}
+                            if name == "update_plan"
+                            else set()
+                        )
                         started = perf_counter()
                         try:
                             result = self.registry.execute(name, arguments)
@@ -329,6 +403,10 @@ class Agent:
                                 record_history(self.history.raised, identifier, error, (perf_counter() - started) * 1000)
                             raise
                         elapsed_ms = (perf_counter() - started) * 1000
+                        if name == "update_plan" and isinstance(result, dict) and result.get("ok") is True:
+                            after_completed = {s["content"] for s in self.plan.steps if s["status"] == "completed"}
+                            if after_completed - before_completed:
+                                self._step_completed_since_prepare = True
                         if name == "search_qgis_tools" and isinstance(result, list) and self.load_qgis_tool is not None:
                             algorithms = list(state["algorithms"])
                             for item in result:
@@ -347,34 +425,7 @@ class Agent:
                             result = self.accept_finish(result, state)
                         message["executions"][call["id"]] = "finished"
                         tool_outputs = result.get("outputs", []) if isinstance(result, dict) and "outputs" in result else []
-                        emit_event(
-                            self.on_event, "tool_finished", self.store.session_id,
-                            tool=name, call_id=call["id"], ok=result.get("ok") if isinstance(result, dict) else True,
-                            elapsed_ms=elapsed_ms, outputs=tool_outputs,
-                        )
-                        if isinstance(result, dict) and result.get("ok") is True:
-                            if name == "update_plan" and isinstance(result.get("plan"), dict):
-                                emit_event(
-                                    self.on_event, "plan_updated", self.store.session_id,
-                                    goal=result["plan"].get("goal", ""),
-                                    steps=result["plan"].get("steps", []),
-                                )
-                            self._emit_published_artifacts(
-                                name, result,
-                                is_finish=(name == "finish_task"),
-                            )
-                            if name == "finish_task" and result.get("status") == "needs_input":
-                                emit_event(
-                                    self.on_event, "interaction_required", self.store.session_id,
-                                    request_id=identifier or f"q{len(self.messages)}",
-                                    checkpoint_kind=result.get("checkpoint_kind") or "clarification",
-                                    summary=result["summary"],
-                                    question=result.get("question", result["summary"]),
-                                    options=result.get("options", []),
-                                    reason=result.get("reason"),
-                                    artifacts=result.get("artifacts", []),
-                                    unresolved=result.get("unresolved", []),
-                                )
+                        executed = True
             if name in {"remember_memory", "forget_memory"}:
                 errors = set(state["memory_errors"])
                 if isinstance(result, dict) and result.get("ok"):
@@ -390,6 +441,36 @@ class Agent:
             self.messages.append(stored)
             self.store.save(self.messages)
             logger.info("工具 %s：%s", name, stored["content"][:1200])
+            if executed:
+                emit_event(
+                    self.on_event, "tool_finished", self.store.session_id,
+                    tool=name, call_id=call["id"], ok=result.get("ok") if isinstance(result, dict) else True,
+                    elapsed_ms=elapsed_ms, outputs=tool_outputs,
+                )
+                if isinstance(result, dict) and result.get("ok") is True:
+                    if name == "update_plan" and isinstance(result.get("plan"), dict):
+                        emit_event(
+                            self.on_event, "plan_updated", self.store.session_id,
+                            goal=result["plan"].get("goal", ""),
+                            steps=result["plan"].get("steps", []),
+                        )
+                    self._emit_published_artifacts(
+                        name, result,
+                        arguments=arguments,
+                        is_finish=(name == "finish_task"),
+                    )
+                    if name == "finish_task" and result.get("status") == "needs_input":
+                        emit_event(
+                            self.on_event, "interaction_required", self.store.session_id,
+                            request_id=identifier or f"q{len(self.messages)}",
+                            checkpoint_kind=result.get("checkpoint_kind") or "clarification",
+                            summary=result["summary"],
+                            question=result.get("question", result["summary"]),
+                            options=result.get("options", []),
+                            reason=result.get("reason"),
+                            artifacts=result.get("artifacts", []),
+                            unresolved=result.get("unresolved", []),
+                        )
         if self._is_cancelled() and state.get("outcome") is None:
             state["outcome"] = {
                 "ok": True,
@@ -464,11 +545,31 @@ class Agent:
         state["outcome"] = result
         return result
 
-    def _emit_published_artifacts(self, source_tool: str, result: dict[str, Any], *, is_finish: bool = False) -> None:
+    def _emit_published_artifacts(
+        self,
+        source_tool: str,
+        result: dict[str, Any],
+        *,
+        arguments: dict[str, Any] | None = None,
+        is_finish: bool = False,
+    ) -> None:
         if self.on_event is None:
             return
         seen: set[str] = set()
         candidates: list[dict[str, Any]] = []
+        if source_tool == "inspect_data" and isinstance(arguments, dict):
+            src = arguments.get("source")
+            if isinstance(src, str) and src.strip():
+                candidates.append({"path": src, "_role": "input"})
+            srcs = arguments.get("sources")
+            if isinstance(srcs, list):
+                for item in srcs:
+                    if isinstance(item, str) and item.strip():
+                        candidates.append({"path": item, "_role": "input"})
+        elif source_tool == "read_file" and isinstance(arguments, dict):
+            fpath = arguments.get("path")
+            if isinstance(fpath, str) and fpath.lower().endswith(".csv"):
+                candidates.append({"path": fpath, "_role": "input"})
         outputs = result.get("outputs")
         if isinstance(outputs, list):
             for item in outputs:
@@ -490,7 +591,7 @@ class Agent:
             if norm in seen:
                 continue
             seen.add(norm)
-            clean_path = raw_path.split("|layername=", 1)[0]
+            clean_path, sep, layer_part = raw_path.partition("|layername=")
             file_path = Path(clean_path)
             if not file_path.exists():
                 continue
@@ -498,12 +599,17 @@ class Agent:
             size_bytes = int(item.get("bytes")) if isinstance(item.get("bytes"), int) else (file_path.stat().st_size if file_path.is_file() else 0)
             if size_bytes == 0 and file_path.is_file():
                 continue
+            resolved_path = str(file_path.resolve())
+            if sep:
+                resolved_path = f"{resolved_path}|layername={layer_part.split('|', 1)[0]}"
             payload: dict[str, Any] = {
-                "path": str(file_path.resolve()),
+                "path": resolved_path,
                 "kind": kind,
                 "name": file_path.name,
                 "bytes": size_bytes,
                 "source_tool": source_tool,
+                "role": item.get("_role") or ("result" if is_finish else "intermediate"),
+                "is_finish": bool(is_finish),
                 "preview_ready": kind in {"vector", "raster", "figure", "html_map", "table", "script"},
             }
             if isinstance(item.get("spatial"), dict):
