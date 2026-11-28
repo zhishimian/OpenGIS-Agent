@@ -1864,6 +1864,83 @@ def test_v92_read_image_budget_notice(tmp_path: Path) -> None:
     assert r3["ok"] and r3["read_image_calls"] == 3 and "budget_notice" in r3
 
 
+def test_v921_fix_hints_and_smooth_contours(tmp_path: Path) -> None:
+    """验证 add_smooth_contours 掩膜平滑等值线与 layout_diagnostics.fix_hints 精准修复建议。"""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from gis_agent.integrations.plotting import (
+        MapPanel,
+        add_continuous_colorbar,
+        add_smooth_contours,
+        configure_plotting,
+        create_thematic_layout,
+        export_figure,
+        finalize_map_panel,
+        get_scientific_cmap,
+    )
+
+    configure_plotting(font_style="sans")
+    yy, xx = np.mgrid[0:60, 0:80]
+    grid = 800.0 + 400.0 * np.sin(xx / 15.0) * np.cos(yy / 12.0) + 3.0 * yy
+    grid[:8, :8] = np.nan
+    grid[-8:, -8:] = np.nan
+    extent = (500_000.0, 580_000.0, 3_500_000.0, 3_560_000.0)
+
+    lay = create_thematic_layout(n_panels=1, fig_width=8.4)
+    try:
+        ax = lay.axes[0]
+        cmap = get_scientific_cmap("sequential", "pub_dem_terrain", nodata_color=None)
+        im = ax.imshow(grid, extent=extent, origin="upper", cmap=cmap, zorder=2)
+        c_res = add_smooth_contours(ax, grid, extent, levels=6, smooth_sigma=1.2)
+        assert len(c_res["levels"]) >= 3
+        assert c_res["contours"] is not None
+        assert len(c_res["labels"]) >= 1
+        add_continuous_colorbar(lay.ax_legend, im, orientation="horizontal", label="Elevation (m)")
+        finalize_map_panel(ax, crs="EPSG:32650", loc="auto", north_loc="auto")
+        clean_res = export_figure(
+            lay.fig,
+            tmp_path / "smooth_clean",
+            formats=("png",),
+            map_panels=(MapPanel("main", ax, "EPSG:32650"),),
+        )
+    finally:
+        plt.close(lay.fig)
+
+    assert clean_res["layout_diagnostics"]["fix_hints"] == [], clean_res["layout_diagnostics"]
+
+    fig_bad = plt.figure(figsize=(8.0, 5.5))
+    try:
+        ax_b = fig_bad.add_axes([0.12, 0.14, 0.78, 0.74])
+        ax_b.plot([0, 100], [0, 100])
+        ax_b.set_xlim(0, 100)
+        ax_b.set_ylim(0, 100)
+        ax_b.set_xticks([])
+        ax_b.set_yticks([])
+        ax_b.set_xlabel("Easting")
+        ax_b.annotate(
+            "Boxed Note",
+            xy=(50, 50),
+            xytext=(65, 70),
+            bbox={"boxstyle": "round", "facecolor": "#ffffff", "alpha": 0.9},
+            arrowprops={"arrowstyle": "-"},
+        )
+        bad_res = export_figure(
+            fig_bad,
+            tmp_path / "bad_hints",
+            formats=("png",),
+            map_panels=(MapPanel("main", ax_b, "EPSG:32650"),),
+        )
+    finally:
+        plt.close(fig_bad)
+
+    hints_text = "\n".join(bad_res["layout_diagnostics"]["fix_hints"])
+    assert bad_res["layout_diagnostics"]["hygiene"]["callout_box_warning"] is True
+    assert bad_res["layout_diagnostics"]["hygiene"]["bare_axis_label_warning"] is True
+    assert "bbox" in hints_text and "add_leader_callouts" in hints_text
+    assert "Easting" in hints_text and "finalize_map_panel" in hints_text
+
+
+
 
 
 

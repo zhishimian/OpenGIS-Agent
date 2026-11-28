@@ -692,6 +692,63 @@ def _compute_cartography_hygiene_diagnostics(
     }
 
 
+def _build_layout_fix_hints(layout_diag: dict[str, Any]) -> list[str]:
+    """为命中的制图卫生或排版告警生成单条可执行的代码级修复提示。"""
+    hyg = layout_diag.get("hygiene") or {}
+    typo = layout_diag.get("typography") or {}
+    rules: tuple[tuple[bool, str], ...] = (
+        (
+            bool(hyg.get("chrome_overlap_warning")),
+            "Move scalebar/north arrow via finalize_map_panel(..., loc='auto', north_loc='auto') AFTER legends/colorbars, or pass an explicit quiet corner.",
+        ),
+        (
+            bool(hyg.get("component_crowding_warning")),
+            "Increase GridSpec hspace/wspace or use create_composite_layout / create_study_area_layout so panel labels, titles, and colorbars have >=6pt breathing room.",
+        ),
+        (
+            bool(hyg.get("clipped_text_warning")),
+            "Keep titles/legends/labels inside figure bounds by adjusting subplots_adjust margins, shortening labels, or moving legends inside lay.ax_legend.",
+        ),
+        (
+            bool(hyg.get("frame_overflow_warning")),
+            "Use label_context_polygons(ax, gdf, col, exclude_geom=...) for neighbor labels so text never overflows the map frame.",
+        ),
+        (
+            bool(hyg.get("callout_box_warning")),
+            "Remove opaque bbox= patches on map annotations; use plain haloed text or add_leader_callouts instead.",
+        ),
+        (
+            bool(hyg.get("bare_axis_label_warning")),
+            "Clear bare Easting/Northing/Longitude/Latitude axis labels or call finalize_map_panel(ax, crs=..., graticule=True).",
+        ),
+        (
+            bool(hyg.get("duplicate_axis_ticks_warning")),
+            "Call add_graticule_frame(ax, crs=...) / finalize_map_panel so raw numeric projected ticks are hidden when DMS ticks are drawn.",
+        ),
+        (
+            bool(hyg.get("subtitle_detected_warning")),
+            "Remove stacked secondary figure subtitle; keep a single clean title or panel headers.",
+        ),
+        (
+            bool(hyg.get("china_standard_map_warning")),
+            "Use plot_china_standard_map(..., add_scs_inset=True) with CHINA_ALBERS_PROJ and the bundled ten-dash line.",
+        ),
+        (
+            bool(typo.get("small_text_warning")),
+            "Keep all text >= 10 pt (use theme['fonts']['T4']=10, T3=12, T2=14, T1=16 from apply_publication_theme).",
+        ),
+        (
+            bool(typo.get("non_even_font_warning")),
+            "Snap custom font sizes to even integers (10/12/14/16 pt) via apply_publication_theme.",
+        ),
+        (
+            bool(layout_diag.get("excessive_margin_warning")),
+            "Tighten subplots_adjust margins or canvas aspect ratio to reduce empty outer whitespace.",
+        ),
+    )
+    return [hint for triggered, hint in rules if triggered]
+
+
 def export_figure(
     figure: Figure, output_dir: str | Path, *, formats: tuple[str, ...] = ("png",),
     dpi: int = 300, inputs: tuple[str | Path, ...] = (), map_panels: tuple[MapPanel, ...] = (),
@@ -747,6 +804,7 @@ def export_figure(
     layout_diagnostics = _compute_layout_diagnostics(preview)
     layout_diagnostics["typography"] = _compute_typography_diagnostics(figure, height)
     layout_diagnostics["hygiene"] = hygiene_diag
+    layout_diagnostics["fix_hints"] = _build_layout_fix_hints(layout_diagnostics)
     timings["diagnostics_ms"] = (perf_counter() - measured) * 1000 + hygiene_ms
     panels = [{"name": panel.name, "crs": panel.crs,
                "extent": [panel.axes.get_xlim()[0], panel.axes.get_ylim()[0], panel.axes.get_xlim()[1], panel.axes.get_ylim()[1]],

@@ -9,6 +9,7 @@
   - Elevation / DEM: map true `[vmin, vmax]` onto `"pub_dem_terrain"` or `"hypsometric"` layered softly over `matplotlib.colors.LightSource.hillshade(...)` — never force `zero_anchored=True` on non-zero elevation.
   - Non-negative flux / rainfall / snow starting at `0`: use `get_scientific_cmap(..., zero_anchored=True)` + `build_perceptual_norm(vals)` + `add_continuous_colorbar(..., zero_label=None)`.
 - **Multi-Panel Shared Scales**: When comparing panels (`create_thematic_layout(n_panels=...)`), lock identical `cmap` and `norm` across every panel and share one colorbar inside `lay.ax_legend`.
+- **Smooth Isolines**: Overlay clean contours with `add_smooth_contours(ax, arr, extent, levels=8, smooth_sigma=1.2)` for mask-safe Gaussian smoothing, round interval ticks, and white-haloed labels without jagged `NoData` edge artifacts.
 - **Optional Marginal Profiles**: Only when spatial longitude/latitude gradients are explicitly requested, use `attach_marginal_profiles(fig, ratio=0.19, pad=0.03)`.
 
 ## 2. OD Flow & Hub Networks (`flow_od.py`)

@@ -12,7 +12,7 @@ from gis_agent.integrations.plotting import (
     plot_china_standard_map, add_clean_legend, add_continuous_colorbar,
     add_scalebar_and_north, add_graticule_frame, add_locator_inset,
     add_leader_callouts, get_scientific_cmap, build_perceptual_norm,
-    add_flow_arcs, add_size_legend,
+    add_flow_arcs, add_size_legend, add_smooth_contours,
 )
 ```
 
@@ -39,4 +39,5 @@ from gis_agent.integrations.plotting import (
 - `add_scalebar_and_north(ax, *, crs_units="metre", loc="auto", scale=True, north=True, north_loc="auto", scale_style="cartographic", north_style="compass_star")`
 - `add_leader_callouts(ax, items, *, use_adjust_text=True, fontsize=None, zorder=15)`
 - `add_flow_arcs(ax, flows, *, value_col=None, directed=False, symmetric=True, n_classes=4, cmap="carto_oryel", zorder=5.0)` & `add_size_legend(ax, items, *, layout="nested"|"vertical"|"horizontal", title=None, line_items=None, line_title=None, frameon=True)`
+- `add_smooth_contours(ax, grid, extent, *, levels=8, smooth_sigma=1.0, colors="#4a4a4a", linewidths=0.7, label=True, fmt="%g") -> {"contours", "levels", "labels"}`
 - `attach_marginal_profiles`, `add_zoom_connectors`, `add_orthogonal_bus_connectors`, `add_bivariate_legend`, `bivariate_classify`, `get_palette`, `list_palettes`, `find_quiet_corner`, `rank_quiet_corners`.

@@ -1663,3 +1663,105 @@ def find_quiet_corner(
     if not ranked:
         raise ValueError("所有候选角落均被排除，无法选出空白位置。")
     return ranked[0][0]
+
+
+def _gaussian_1d_kernel(sigma: float) -> np.ndarray:
+    radius = max(1, int(math.ceil(3.0 * sigma)))
+    x = np.arange(-radius, radius + 1, dtype=float)
+    kernel = np.exp(-0.5 * (x / sigma) ** 2)
+    return kernel / np.sum(kernel)
+
+
+def _smooth_2d_fallback(arr: np.ndarray, sigma: float) -> np.ndarray:
+    kernel = _gaussian_1d_kernel(sigma)
+    pad = len(kernel) // 2
+
+    def _conv_axis(data: np.ndarray, axis: int) -> np.ndarray:
+        padded = np.pad(data, ((pad, pad), (0, 0)) if axis == 0 else ((0, 0), (pad, pad)), mode="edge")
+        return np.apply_along_axis(lambda v: np.convolve(v, kernel, mode="valid"), axis, padded)
+
+    return _conv_axis(_conv_axis(arr, 0), 1)
+
+
+def add_smooth_contours(
+    ax: Axes,
+    grid: Any,
+    extent: tuple[float, float, float, float],
+    *,
+    levels: int | Sequence[float] = 8,
+    smooth_sigma: float = 1.0,
+    colors: str | Sequence[str] = "#4a4a4a",
+    linewidths: float = 0.7,
+    alpha: float = 0.75,
+    label: bool = True,
+    fmt: str = "%g",
+    fontsize: float | None = None,
+    zorder: float = 4.5,
+) -> dict[str, Any]:
+    """在连续栅格场上绘制掩膜安全高斯平滑等值线及白色描边标签。"""
+    if np.ma.isMaskedArray(grid):
+        arr = np.asarray(np.ma.filled(grid, np.nan), dtype=float)
+    else:
+        arr = np.asarray(grid, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+        raise ValueError("add_smooth_contours 需要二维且行列数均 >= 2 的栅格数组。")
+    finite_mask = np.isfinite(arr)
+    if not np.any(finite_mask):
+        raise ValueError("add_smooth_contours 输入栅格不含任何有限有效像元。")
+
+    if smooth_sigma > 0:
+        valid = finite_mask.astype(float)
+        filled = np.where(finite_mask, arr, 0.0)
+        try:
+            from scipy.ndimage import gaussian_filter
+
+            num = gaussian_filter(filled, sigma=float(smooth_sigma), mode="nearest")
+            den = gaussian_filter(valid, sigma=float(smooth_sigma), mode="nearest")
+        except Exception:
+            num = _smooth_2d_fallback(filled, float(smooth_sigma))
+            den = _smooth_2d_fallback(valid, float(smooth_sigma))
+        smoothed = np.where(finite_mask & (den > 1e-6), num / np.maximum(den, 1e-6), np.nan)
+    else:
+        smoothed = arr.copy()
+
+    finite_vals = smoothed[np.isfinite(smoothed)]
+    vmin = float(np.min(finite_vals))
+    vmax = float(np.max(finite_vals))
+    if isinstance(levels, (int, np.integer)):
+        if math.isclose(vmin, vmax, rel_tol=1e-12, abs_tol=1e-12):
+            contour_levels: list[float] = []
+        else:
+            raw_ticks = mticker.MaxNLocator(
+                nbins=max(int(levels), 2),
+                steps=[1, 2, 2.5, 5, 10],
+            ).tick_values(vmin, vmax)
+            contour_levels = [float(v) for v in raw_ticks if vmin < float(v) < vmax]
+            if not contour_levels:
+                contour_levels = [
+                    float(v) for v in np.linspace(vmin, vmax, max(int(levels), 2) + 2)[1:-1]
+                ]
+    else:
+        contour_levels = [float(v) for v in levels]
+
+    x0, x1, y0, y1 = (float(v) for v in extent)
+    x = np.linspace(x0, x1, arr.shape[1])
+    y = np.linspace(y1, y0, arr.shape[0])
+    cs = ax.contour(
+        x,
+        y,
+        smoothed,
+        levels=contour_levels,
+        colors=colors,
+        linewidths=linewidths,
+        alpha=alpha,
+        zorder=zorder,
+    )
+    texts: list[Any] = []
+    if label and len(contour_levels) > 0:
+        fs = _snap_even(_resolve_pt(fontsize, "xtick.labelsize", 10.0), minimum=10)
+        raw_texts = ax.clabel(cs, inline=True, inline_spacing=3.0, fmt=fmt, fontsize=fs)
+        halo = [path_effects.withStroke(linewidth=2.0, foreground="#ffffff", alpha=0.9)]
+        for txt in raw_texts:
+            txt.set_path_effects(halo)
+            texts.append(txt)
+    return {"contours": cs, "levels": [float(v) for v in contour_levels], "labels": texts}

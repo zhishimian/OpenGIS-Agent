@@ -31,6 +31,7 @@ Read **ONLY the single booklet + single short script** for your current map type
 
 ## 3. Convergence & Cost Discipline ("1 Draft + 1-2 Hard-Defect Fixes")
 
+- **Two-Stage Data vs. Draw Split**: For large raw vectors/rasters (>20 MB or multi-layer reprojection/clipping), write a one-shot `stage_data.py` that saves lightweight projected `.gpkg`/`.npz` caches, then iterate only in a fast `draw_map.py` (~2 s per PNG). Skip staging if inputs are already prepared.
 - **Target rhythm**: `1 data inspect -> 1 complete script producing PNG -> 1 full-image read_image QA -> (only if hard defects exist) 1-2 targeted edits -> final PNG+SVG export & finish_task`.
 - **Hard bans**:
   - NEVER write scratch probe scripts (`explore_*.py`, `test_cmap*.py`, `probe_*.py`, `read_diag.py`).
