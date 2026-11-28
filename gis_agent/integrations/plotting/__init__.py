@@ -1,4 +1,9 @@
-"""出版级地理制图运行时与可组合原语接口。"""
+"""出版级地理制图运行时、可组合原语与版式骨架统一出口。"""
+from gis_agent.integrations.plotting.china import (
+    CHINA_ALBERS_PROJ,
+    load_china_standard_basemap,
+    plot_china_standard_map,
+)
 from gis_agent.integrations.plotting.primitives import (
     BANNED_CMAPS,
     BIVARIATE_PALETTES,
@@ -13,8 +18,10 @@ from gis_agent.integrations.plotting.primitives import (
     add_graticule_frame,
     add_leader_callouts,
     add_locator_inset,
+    add_orthogonal_bus_connectors,
     add_scalebar_and_north,
     add_size_legend,
+    add_zoom_connectors,
     apply_publication_theme,
     attach_marginal_profiles,
     bivariate_classify,
@@ -28,10 +35,15 @@ from gis_agent.integrations.plotting.primitives import (
     list_palettes,
     rank_quiet_corners,
 )
-from gis_agent.integrations.plotting.china import (
-    CHINA_ALBERS_PROJ,
-    load_china_standard_basemap,
-    plot_china_standard_map,
+from gis_agent.integrations.plotting.recipes import (
+    CompositeLayout,
+    StudyAreaLayout,
+    ThematicLayout,
+    create_composite_layout,
+    create_study_area_layout,
+    create_thematic_layout,
+    finalize_map_panel,
+    label_context_polygons,
 )
 from gis_agent.integrations.plotting.runtime import MapPanel, configure_plotting, export_figure
 
@@ -39,11 +51,14 @@ __all__ = [
     "BANNED_CMAPS",
     "BIVARIATE_PALETTES",
     "CHINA_ALBERS_PROJ",
+    "CompositeLayout",
     "DIVERGING_PALETTES",
     "GEO_COLORS",
     "MapPanel",
     "QUALITATIVE_PALETTES",
     "SEQUENTIAL_PALETTES",
+    "StudyAreaLayout",
+    "ThematicLayout",
     "add_bivariate_legend",
     "add_clean_legend",
     "add_continuous_colorbar",
@@ -51,8 +66,10 @@ __all__ = [
     "add_graticule_frame",
     "add_leader_callouts",
     "add_locator_inset",
+    "add_orthogonal_bus_connectors",
     "add_scalebar_and_north",
     "add_size_legend",
+    "add_zoom_connectors",
     "apply_publication_theme",
     "attach_marginal_profiles",
     "bivariate_classify",
@@ -60,11 +77,16 @@ __all__ = [
     "build_perceptual_norm",
     "compute_ax_ink_mask",
     "configure_plotting",
+    "create_composite_layout",
+    "create_study_area_layout",
+    "create_thematic_layout",
     "export_figure",
+    "finalize_map_panel",
     "find_quiet_corner",
     "get_bivariate_palette",
     "get_palette",
     "get_scientific_cmap",
+    "label_context_polygons",
     "list_palettes",
     "load_china_standard_basemap",
     "plot_china_standard_map",

@@ -7,6 +7,18 @@ from typing import Any
 from gis_agent.tools.base import Tool
 
 
+_INTERNAL_PLOTTING_ROOT = (Path(__file__).resolve().parents[1] / "integrations" / "plotting").resolve()
+
+
+def _check_internal_read_block(target: Path) -> str | None:
+    if target == _INTERNAL_PLOTTING_ROOT or target.is_relative_to(_INTERNAL_PLOTTING_ROOT):
+        return (
+            "禁止读取框架内部绘图源码（gis_agent/integrations/plotting/）；"
+            "请直接信任 gis-cartography/references/api.md 与对应图种范例脚本中的签名进行调用。"
+        )
+    return None
+
+
 def _check_write_access(
     target: Path,
     allowed_roots: tuple[Path, ...] = (),
@@ -25,6 +37,8 @@ def _check_write_access(
 
 def list_files(path: str, start: int = 0, limit: int = 100) -> dict[str, Any]:
     directory = Path(path).expanduser().resolve()
+    if blocked := _check_internal_read_block(directory):
+        return {"ok": False, "error": blocked}
     if not directory.is_dir():
         return {"ok": False, "error": f"目录不存在：{directory}"}
     if start < 0 or not 1 <= limit <= 500:
@@ -49,6 +63,8 @@ def read_file(
     encoding: str = "utf-8",
 ) -> dict[str, Any]:
     target = Path(path).expanduser().resolve()
+    if blocked := _check_internal_read_block(target):
+        return {"ok": False, "error": blocked}
     if not target.is_file():
         return {"ok": False, "error": f"文件不存在：{target}"}
     if start < 0 or not 1 <= limit <= 32000:
@@ -139,6 +155,8 @@ def edit_file(
 
 def search_text(path: str, query: str, limit: int = 20) -> dict[str, Any]:
     target = Path(path).expanduser().resolve()
+    if blocked := _check_internal_read_block(target):
+        return {"ok": False, "error": blocked}
     if not target.is_file():
         return {"ok": False, "error": f"文本文件不存在：{target}"}
     if not query or not 1 <= limit <= 100:

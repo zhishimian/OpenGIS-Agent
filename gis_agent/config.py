@@ -135,7 +135,7 @@ class AppConfig:
         context = ContextConfig(
             request_token_limit=min(
                 int(os.environ.get("GIS_AGENT_REQUEST_TOKENS", "900000")),
-                model.context_window - model.max_tokens - 16384,
+                model.context_window - (model.max_tokens or 0) - 16384,
             ),
             compact_ratio=float(os.environ.get("GIS_AGENT_COMPACT_RATIO", "0.45")),
         )

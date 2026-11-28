@@ -1,11 +1,26 @@
-from functools import partial
 from pathlib import Path
+from typing import Any
 
 from gis_agent.persistence.images import save_image
 from gis_agent.tools.base import Tool
 
 
 def make_image_tool(directory: Path) -> Tool:
+    count = [0]
+
+    def _read_image(path: str, crop: list[int] | None = None) -> dict[str, Any]:
+        res = save_image(path=path, crop=crop, directory=directory)
+        if res.get("ok"):
+            count[0] += 1
+            res["read_image_calls"] = count[0]
+            if count[0] >= 3:
+                res["budget_notice"] = (
+                    f"本会话已调用 read_image {count[0]} 次。"
+                    "若 layout_diagnostics 全部警告为 false 且无明显遮挡/裁切，"
+                    "请立即导出最终 PNG+SVG 并调用 finish_task，严禁继续连续切块微调。"
+                )
+        return res
+
     return Tool(
         name="read_image",
         description=(
@@ -28,5 +43,5 @@ def make_image_tool(directory: Path) -> Tool:
             "required": ["path"],
             "additionalProperties": False,
         },
-        function=partial(save_image, directory=directory),
+        function=_read_image,
     )

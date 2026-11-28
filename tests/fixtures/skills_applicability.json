@@ -24,5 +24,6 @@
   {"id":"zh-overlay-plan", "prompt":"更新新采集地块的用途，保留其他区域，随后按更新用地和河流距离筛选设施位置。", "expected":["gis-vector-and-network","gis-verification"], "reason":"Vector overlay and downstream selection require a nontrivial workflow and consequential assumptions."},
   {"id":"en-map-text", "prompt":"The analysis is already checked. Remove technical text clutter and fix labels hiding sites in the map image.", "expected":["gis-cartography"], "reason":"Map readability and observed occlusion, without repeating numerical analysis."},
   {"id":"en-kriging-cv", "prompt":"Interpolate air-quality stations with Ordinary Kriging and tune variogram parameters using spatial blocks.", "expected":["gis-spatial-statistics","gis-verification"], "reason":"Geostatistical interpolation and spatial CV leakage prevention."},
-  {"id":"zh-savi-scale", "prompt":"对未定标的整型卫星波段对齐网格并计算 SAVI 植被指数与分区均值。", "expected":["gis-raster-and-imagery"], "reason":"Grid snapping and non-scale-invariant SAVI radiometric scaling."}
+  {"id":"zh-savi-scale", "prompt":"对未定标的整型卫星波段对齐网格并计算 SAVI 植被指数与分区均值。", "expected":["gis-raster-and-imagery"], "reason":"Grid snapping and non-scale-invariant SAVI radiometric scaling."},
+  {"id":"en-color-design", "prompt":"Customize a publication terrain DEM palette and multi-layer bivariate color scheme for the study area map.", "expected":["gis-cartography","gis-color-design"], "reason":"Custom thematic and bivariate cartographic color styling."}
 ]

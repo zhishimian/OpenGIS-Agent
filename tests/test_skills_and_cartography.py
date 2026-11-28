@@ -106,6 +106,7 @@ def test_skill_discovery_only_discloses_metadata() -> None:
                            supports_images=True, supports_memory=False)
     assert {item["name"] for item in skills} == {
         "gis-cartography",
+        "gis-color-design",
         "gis-verification",
         "gis-data-io-and-staging",
         "gis-vector-and-network",
@@ -238,6 +239,7 @@ def test_skill_format_links_language_and_disclosure() -> None:
     skills = skill_index()
     assert {s["name"] for s in skills} == {
         "gis-cartography",
+        "gis-color-design",
         "gis-verification",
         "gis-data-io-and-staging",
         "gis-vector-and-network",
@@ -1638,6 +1640,232 @@ def test_v92_auto_scalebar_avoids_hainan_and_overlap_guard(tmp_path: Path) -> No
         plt.close(fig2)
     assert res2["layout_diagnostics"]["hygiene"]["chrome_overlap_warning"] is True
     assert any("scalebar overlaps map content" in msg for msg in res2["layout_diagnostics"]["hygiene"]["chrome_overlaps"])
+
+
+def test_v92_plotting_modular_compat() -> None:
+    """拆解 primitives.py 后，所有既有公开原语仍可同时从 plotting 与 primitives 导入。"""
+    import gis_agent.integrations.plotting as plotting
+    import gis_agent.integrations.plotting.primitives as primitives
+
+    for sym in primitives.__all__:
+        assert hasattr(primitives, sym), sym
+        assert hasattr(plotting, sym), sym
+    for recipe_sym in (
+        "StudyAreaLayout",
+        "ThematicLayout",
+        "create_study_area_layout",
+        "create_thematic_layout",
+        "finalize_map_panel",
+    ):
+        assert hasattr(plotting, recipe_sym), recipe_sym
+    catalog = plotting.list_palettes()
+    assert "pub_dem_terrain" in catalog["sequential"]
+    assert "pub_lulc" in catalog["qualitative"]
+
+
+def test_v92_gis_color_design_skill() -> None:
+    """独立配色技能 gis-color-design 可被 skill_index 发现且规范文档齐全。"""
+    skills = {item["name"]: item for item in skill_index()}
+    assert len(skills) == 8 and "gis-color-design" in skills
+    color_dir = SKILLS / "gis-color-design"
+    assert (color_dir / "SKILL.md").is_file()
+    assert (color_dir / "references/palettes.md").is_file()
+
+
+def test_v92_recipes_study_area_and_thematic(tmp_path: Path) -> None:
+    """验证 recipes.py 的 3panel_left 区位骨架与专题骨架可零警告端到端渲染。"""
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+    from shapely.geometry import box
+    from gis_agent.integrations.plotting import (
+        CHINA_ALBERS_PROJ,
+        GEO_COLORS,
+        MapPanel,
+        configure_plotting,
+        create_study_area_layout,
+        create_thematic_layout,
+        export_figure,
+        finalize_map_panel,
+        load_china_standard_basemap,
+        plot_china_standard_map,
+    )
+
+    configure_plotting(font_style="sans")
+    basemap = load_china_standard_basemap()
+    shaanxi = basemap["provinces"].iloc[:1]
+    study = gpd.GeoDataFrame(geometry=[box(108.9, 35.5, 109.8, 36.1)], crs="EPSG:4326").to_crs("EPSG:32649")
+    neighbors = gpd.GeoDataFrame(geometry=[box(108.0, 34.8, 110.6, 36.8)], crs="EPSG:4326").to_crs("EPSG:32649")
+
+    lay = create_study_area_layout(mode="3panel_left", fig_width=8.8)
+    try:
+        plot_china_standard_map(lay.ax_macro, scs_label=None)
+        study.to_crs(CHINA_ALBERS_PROJ).plot(
+            ax=lay.ax_macro, facecolor="#f4a59a", edgecolor=GEO_COLORS["highlight_accent"], zorder=8
+        )
+        finalize_map_panel(lay.ax_macro, crs=CHINA_ALBERS_PROJ, north=False, loc="auto")
+
+        neighbors.plot(ax=lay.ax_region, facecolor="#efeeea", edgecolor="#c4c0b8", zorder=1)
+        shaanxi.to_crs("EPSG:32649").boundary.plot(ax=lay.ax_region, color="#555555", linewidth=0.8, zorder=3)
+        study.plot(ax=lay.ax_region, facecolor="#f4a59a", edgecolor=GEO_COLORS["highlight_accent"], zorder=8)
+        lay.ax_region.set_xlim(neighbors.total_bounds[0], neighbors.total_bounds[2])
+        lay.ax_region.set_ylim(neighbors.total_bounds[1], neighbors.total_bounds[3])
+        lay.ax_region.set_aspect("equal")
+        finalize_map_panel(lay.ax_region, crs="EPSG:32649", north=False, loc="auto")
+
+        neighbors.plot(ax=lay.ax_main, facecolor="#efeeea", edgecolor="#c4c0b8", zorder=1)
+        study.plot(ax=lay.ax_main, facecolor="#f4a59a", edgecolor=GEO_COLORS["highlight_accent"], linewidth=1.2, zorder=8)
+        lay.ax_main.set_xlim(study.total_bounds[0] - 20_000, study.total_bounds[2] + 20_000)
+        lay.ax_main.set_ylim(study.total_bounds[1] - 20_000, study.total_bounds[3] + 20_000)
+        lay.ax_main.set_aspect("equal")
+        finalize_map_panel(lay.ax_main, crs="EPSG:32649", loc="auto", north=True, north_loc="auto")
+
+        res = export_figure(
+            lay.fig,
+            tmp_path / "recipe_3panel",
+            formats=("png",),
+            map_panels=(
+                MapPanel("macro", lay.ax_macro, CHINA_ALBERS_PROJ),
+                MapPanel("region", lay.ax_region, "EPSG:32649"),
+                MapPanel("main", lay.ax_main, "EPSG:32649"),
+            ),
+        )
+        assert lay.ax_macro.get_adjustable() == "datalim"
+        assert lay.ax_main.get_adjustable() == "datalim"
+        assert abs(lay.ax_macro.get_position().y1 - lay.ax_main.get_position().y1) < 1e-3
+        assert abs(lay.ax_region.get_position().y0 - lay.ax_main.get_position().y0) < 1e-3
+    finally:
+        plt.close(lay.fig)
+
+    hyg = res["layout_diagnostics"]["hygiene"]
+    assert hyg["china_standard_map_warning"] is False, hyg
+    assert hyg["bare_axis_label_warning"] is False, hyg
+    assert hyg["chrome_overlap_warning"] is False, hyg
+    assert hyg["component_crowding_warning"] is False, hyg
+
+    lay2 = create_thematic_layout(n_panels=1, fig_width=8.4, legend_pos="bottom")
+    try:
+        study.plot(ax=lay2.axes[0], facecolor="#d64541", edgecolor="#333333", zorder=8)
+        lay2.axes[0].set_aspect("equal")
+        finalize_map_panel(lay2.axes[0], crs="EPSG:32649", loc="auto", north=True, north_loc="auto")
+        res2 = export_figure(
+            lay2.fig,
+            tmp_path / "recipe_thematic",
+            formats=("png",),
+            map_panels=(MapPanel("main", lay2.axes[0], "EPSG:32649"),),
+        )
+    finally:
+        plt.close(lay2.fig)
+    assert res2["layout_diagnostics"]["hygiene"]["bare_axis_label_warning"] is False
+    assert res2["layout_diagnostics"]["hygiene"]["component_crowding_warning"] is False
+
+
+def test_v92_file_tools_block_internal_plotting_source() -> None:
+    """文件读取工具禁止探测框架内部 plotting/ 源码，但允许读取技能文档与 api.md。"""
+    from gis_agent.tools.files import list_files, read_file, search_text
+
+    plot_dir = ROOT / "gis_agent/integrations/plotting"
+    assert list_files(str(plot_dir))["ok"] is False
+    assert read_file(str(plot_dir / "chrome.py"))["ok"] is False
+    assert search_text(str(plot_dir / "runtime.py"), "export_figure")["ok"] is False
+    assert read_file(str(ROOT / "gis_agent/skills/gis-cartography/references/api.md"))["ok"] is True
+
+
+def test_v92_composite_layout_and_context_labels(tmp_path: Path) -> None:
+    """验证 create_composite_layout、label_context_polygons 与 show_pct 计数自动归一化。"""
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from shapely.geometry import box
+    from gis_agent.integrations.plotting import (
+        GEO_COLORS,
+        MapPanel,
+        add_clean_legend,
+        add_continuous_colorbar,
+        configure_plotting,
+        create_composite_layout,
+        export_figure,
+        finalize_map_panel,
+        get_scientific_cmap,
+        label_context_polygons,
+    )
+
+    configure_plotting(font_style="sans")
+    study = gpd.GeoDataFrame(geometry=[box(500_000, 3_500_000, 560_000, 3_560_000)], crs="EPSG:32650")
+    neighbors = gpd.GeoDataFrame(
+        {"name": ["North", "East", "South"]},
+        geometry=[
+            box(460_000, 3_560_000, 600_000, 3_620_000),
+            box(560_000, 3_460_000, 620_000, 3_560_000),
+            box(460_000, 3_440_000, 560_000, 3_500_000),
+        ],
+        crs="EPSG:32650",
+    )
+
+    lay = create_composite_layout(mode="map_left_stats_right", n_stats=2, fig_width=11.0)
+    try:
+        lay.fig.suptitle("Composite Benchmark Skeleton", fontsize=lay.theme["fonts"]["T1"], fontweight="bold")
+        lay.ax_map.set_facecolor(GEO_COLORS["ocean_soft"])
+        neighbors.plot(ax=lay.ax_map, facecolor="#efeeea", edgecolor="#c4c0b8", zorder=1)
+        study.plot(ax=lay.ax_map, facecolor="#f4a59a", edgecolor=GEO_COLORS["highlight_accent"], zorder=8)
+        lay.ax_map.set_xlim(470_000, 605_000)
+        lay.ax_map.set_ylim(3_455_000, 3_610_000)
+        lay.ax_map.set_aspect("equal")
+        placed = label_context_polygons(lay.ax_map, neighbors, "name", exclude_geom=study.union_all())
+        assert len(placed) == 3
+        finalize_map_panel(lay.ax_map, crs="EPSG:32650", loc="auto", north_loc="auto")
+
+        cmap = get_scientific_cmap("sequential", "nordic_snow", nodata_color=None, zero_anchored=True)
+        add_continuous_colorbar(lay.ax_cbar, cmap=cmap, label="Snowfall (in)", zero_label=None)
+        leg = add_clean_legend(
+            lay.ax_legend,
+            [("<1 in", "#dcdcdc", 129), ("1-24 in", "#e8b44c", 270), (">24 in", "#d96f32", 99)],
+            title="Exposure Tiers",
+            loc="center",
+            ncol=2,
+            show_pct=True,
+            frameon=False,
+        )
+        leg_texts = [t.get_text() for t in leg.get_texts()]
+        assert not any("270.0%" in s or "129.0%" in s for s in leg_texts), leg_texts
+
+        lay.stat_axes[0].barh(["A", "B", "C"], [10, 20, 30], color="#d96f32")
+        lay.stat_axes[0].set_title("(b) Top States", loc="left", fontsize=lay.theme["fonts"]["T2"])
+        lay.stat_axes[0].set_xlabel("Count")
+        lay.stat_axes[1].barh(["X", "Y", "Z"], [5, 15, 25], color="#e8b44c")
+        lay.stat_axes[1].set_title("(c) Latitude Bands", loc="left", fontsize=lay.theme["fonts"]["T2"])
+        lay.stat_axes[1].set_xlabel("Stops")
+
+        res = export_figure(
+            lay.fig, tmp_path / "composite_recipe", formats=("png",),
+            map_panels=(MapPanel("main", lay.ax_map, "EPSG:32650"),),
+        )
+    finally:
+        plt.close(lay.fig)
+
+    hyg = res["layout_diagnostics"]["hygiene"]
+    assert hyg["component_crowding_warning"] is False, hyg
+    assert hyg["frame_overflow_warning"] is False, hyg
+    assert hyg["clipped_text_warning"] is False, hyg
+
+
+def test_v92_read_image_budget_notice(tmp_path: Path) -> None:
+    """验证 read_image 从第 3 次成功调用起返回预算收敛提醒。"""
+    from gis_agent.tools.images import make_image_tool
+
+    img_path = tmp_path / "sample.png"
+    Image.new("RGB", (32, 32), (240, 240, 240)).save(img_path)
+    tool = make_image_tool(tmp_path / "cache")
+
+    r1 = tool.function(path=str(img_path))
+    r2 = tool.function(path=str(img_path))
+    r3 = tool.function(path=str(img_path))
+    assert r1["ok"] and r1["read_image_calls"] == 1 and "budget_notice" not in r1
+    assert r2["ok"] and r2["read_image_calls"] == 2 and "budget_notice" not in r2
+    assert r3["ok"] and r3["read_image_calls"] == 3 and "budget_notice" in r3
+
+
+
+
 
 
 

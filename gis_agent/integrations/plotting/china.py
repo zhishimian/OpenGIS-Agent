@@ -180,6 +180,7 @@ def plot_china_standard_map(
     dash_linewidth: float = 1.0,
     missing_color: str = "#e6e4de",
     approval_note: str | None = None,
+    scs_label: str | None = None,
     render_overlay: Callable[[Axes], None] | None = None,
     custom_path: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -251,29 +252,30 @@ def plot_china_standard_map(
         inset_ax.set_ylim(iy0, iy1)
         inset_ax.set_aspect("equal", adjustable="box")
 
-        from gis_agent.integrations.plotting.primitives import rank_quiet_corners
+        if scs_label:
+            from gis_agent.integrations.plotting.primitives import rank_quiet_corners
 
-        inset_lbl_coords = {
-            "lower left": (0.05, 0.04, "left", "bottom"),
-            "lower right": (0.95, 0.04, "right", "bottom"),
-            "upper right": (0.95, 0.96, "right", "top"),
-        }
-        best_inset_corner = rank_quiet_corners(
-            inset_ax, candidates=("lower left", "upper right", "lower right"), box_frac=(0.55, 0.16),
-        )[0][0]
-        lx, ly, lha, lva = inset_lbl_coords[best_inset_corner]
-        inset_ax.text(
-            lx,
-            ly,
-            "南海诸岛",
-            transform=inset_ax.transAxes,
-            fontsize=10,
-            color="#2b2b2b",
-            ha=lha,
-            va=lva,
-            bbox={"facecolor": "#ffffff", "alpha": 0.90, "edgecolor": "none", "pad": 1.2},
-            zorder=10,
-        )
+            inset_lbl_coords = {
+                "lower left": (0.05, 0.04, "left", "bottom"),
+                "lower right": (0.95, 0.04, "right", "bottom"),
+                "upper right": (0.95, 0.96, "right", "top"),
+            }
+            best_inset_corner = rank_quiet_corners(
+                inset_ax, candidates=("lower left", "upper right", "lower right"), box_frac=(0.55, 0.16),
+            )[0][0]
+            lx, ly, lha, lva = inset_lbl_coords[best_inset_corner]
+            inset_ax.text(
+                lx,
+                ly,
+                scs_label,
+                transform=inset_ax.transAxes,
+                fontsize=10,
+                color="#2b2b2b",
+                ha=lha,
+                va=lva,
+                bbox={"facecolor": "#ffffff", "alpha": 0.90, "edgecolor": "none", "pad": 1.2},
+                zorder=10,
+            )
 
     if approval_note:
         from gis_agent.integrations.plotting.primitives import rank_quiet_corners

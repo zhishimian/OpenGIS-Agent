@@ -610,9 +610,66 @@ def _compute_cartography_hygiene_diagnostics(
         except Exception:
             pass
 
+    # 8. 跨区块紧贴/拥挤检测（基于 tightbbox 实测 pt 间隙，覆盖刻度文字、色带标题与 suptitle）
+    crowded_components: list[str] = []
+    try:
+        renderer = figure.canvas.get_renderer()
+        dpi = max(float(figure.dpi or 100.0), 1.0)
+        vis_axes = [ax for ax in figure.axes if ax.get_visible()]
+        win_bbs = {}
+        for ax in vis_axes:
+            try:
+                win_bbs[id(ax)] = ax.get_window_extent(renderer)
+            except Exception:
+                pass
+        comp_boxes: list[tuple[str, Any]] = []
+        for idx, ax in enumerate(vis_axes):
+            wb = win_bbs.get(id(ax))
+            if wb is None:
+                continue
+            # 跳过完全嵌套在另一 axes 内部的子框（如 south_china_sea_inset / locator_inset）
+            is_nested = any(
+                other is not ax and id(other) in win_bbs
+                and win_bbs[id(other)].contains(wb.x0 + 1.0, wb.y0 + 1.0)
+                and win_bbs[id(other)].contains(wb.x1 - 1.0, wb.y1 - 1.0)
+                for other in vis_axes
+            )
+            if is_nested:
+                continue
+            try:
+                tb = ax.get_tightbbox(renderer)
+            except Exception:
+                tb = wb
+            if tb is not None and tb.width > 0 and tb.height > 0:
+                comp_boxes.append((str(ax.get_gid() or f"axes_{idx}"), tb))
+        inv_fig = figure.transFigure.inverted()
+        for t_idx, txt in enumerate(figure.texts):
+            if not txt.get_visible() or not txt.get_text().strip():
+                continue
+            try:
+                _, fy = inv_fig.transform(txt.get_transform().transform(txt.get_position()))
+                if fy >= 0.80:
+                    tbb = txt.get_window_extent(renderer)
+                    if tbb is not None and tbb.width > 0 and tbb.height > 0:
+                        comp_boxes.append((f"fig_text_{t_idx}", tbb))
+            except Exception:
+                pass
+        for i in range(len(comp_boxes)):
+            na, ba = comp_boxes[i]
+            for j in range(i + 1, len(comp_boxes)):
+                nb, bb = comp_boxes[j]
+                dx = max(0.0, float(bb.x0) - float(ba.x1), float(ba.x0) - float(bb.x1))
+                dy = max(0.0, float(bb.y0) - float(ba.y1), float(ba.y0) - float(bb.y1))
+                gap_pt = math.hypot(dx, dy) * 72.0 / dpi
+                if gap_pt < 6.0:
+                    crowded_components.append(f"{na} <-> {nb} ({gap_pt:.1f}pt)")
+    except Exception:
+        pass
+
     clipped_texts = list(dict.fromkeys(clipped_texts))[:10]
     frame_overflow_texts = list(dict.fromkeys(frame_overflow_texts))[:10]
     chrome_overlaps = list(dict.fromkeys(chrome_overlaps))[:5]
+    crowded_components = list(dict.fromkeys(crowded_components))[:5]
     return {
         "subtitle_detected_warning": bool(subtitle_candidates),
         "subtitle_candidates": subtitle_candidates[:5],
@@ -626,6 +683,8 @@ def _compute_cartography_hygiene_diagnostics(
         "china_standard_map_axes": china_missing_inset_axes[:5],
         "chrome_overlap_warning": bool(chrome_overlaps),
         "chrome_overlaps": chrome_overlaps,
+        "component_crowding_warning": bool(crowded_components),
+        "crowded_components": crowded_components,
         "clipped_text_warning": bool(clipped_texts),
         "clipped_texts": clipped_texts,
         "frame_overflow_warning": bool(frame_overflow_texts),

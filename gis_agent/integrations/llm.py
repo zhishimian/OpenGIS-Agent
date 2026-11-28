@@ -101,8 +101,10 @@ def chat(
     arguments: dict[str, Any] = {
         "model": config.model,
         "messages": view,
-        config.output_parameter: max_tokens if max_tokens is not None else config.max_tokens,
     }
+    eff_max_tokens = max_tokens if max_tokens is not None else config.max_tokens
+    if eff_max_tokens is not None:
+        arguments[config.output_parameter] = eff_max_tokens
     if schemas:
         arguments["tools"] = schemas
     if len(json_text(arguments).encode("utf-8")) > 32 * 1024 * 1024:

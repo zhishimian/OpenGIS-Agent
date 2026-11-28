@@ -11,7 +11,7 @@ DEEPSEEK_MAX_OUTPUT_TOKENS = 393_216
 class ModelConfig:
     model: str = "deepseek-flash"
     base_url: str = "https://api.deepseek.com"
-    max_tokens: int = DEEPSEEK_MAX_OUTPUT_TOKENS
+    max_tokens: int | None = DEEPSEEK_MAX_OUTPUT_TOKENS
     context_window: int = 1_048_576
     tokenizer: str = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
     provider: str = "deepseek"
@@ -24,7 +24,7 @@ class ModelConfig:
             raise ValueError("provider 必须是 deepseek、openai 或 compatible。")
         if not self.model.strip() or not self.base_url.strip() or not self.tokenizer.strip():
             raise ValueError("模型名、服务地址和 tokenizer 必须填写。")
-        if not 0 < self.max_tokens < self.context_window:
+        if self.max_tokens is not None and not 0 < self.max_tokens < self.context_window:
             raise ValueError("输出预算必须大于零，并小于上下文窗口。")
         if self.output_parameter not in {"max_tokens", "max_completion_tokens"}:
             raise ValueError("不支持的输出预算参数名。")
