@@ -27,11 +27,17 @@ from gis_agent.integrations.plotting.primitives import (
     list_palettes,
     rank_quiet_corners,
 )
+from gis_agent.integrations.plotting.china import (
+    CHINA_ALBERS_PROJ,
+    load_china_standard_basemap,
+    plot_china_standard_map,
+)
 from gis_agent.integrations.plotting.runtime import MapPanel, configure_plotting, export_figure
 
 __all__ = [
     "BANNED_CMAPS",
     "BIVARIATE_PALETTES",
+    "CHINA_ALBERS_PROJ",
     "DIVERGING_PALETTES",
     "GEO_COLORS",
     "MapPanel",
@@ -58,5 +64,7 @@ __all__ = [
     "get_palette",
     "get_scientific_cmap",
     "list_palettes",
+    "load_china_standard_basemap",
+    "plot_china_standard_map",
     "rank_quiet_corners",
 ]

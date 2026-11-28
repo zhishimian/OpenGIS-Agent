@@ -504,6 +504,45 @@ def _compute_cartography_hygiene_diagnostics(
     except Exception:
         pass
 
+    # 6. 中国全图标准底图合规检测（覆盖中国全境的主图缺少 south_china_sea_inset 时告警，排除全球/超大洲底图）
+    china_missing_inset_axes: list[str] = []
+    if map_panels:
+        has_scs_inset = any(
+            ax.get_visible() and ax.get_gid() == "south_china_sea_inset"
+            for ax in figure.axes
+        )
+        if not has_scs_inset:
+            try:
+                from pyproj import CRS, Transformer
+
+                for panel in map_panels:
+                    ax = panel.axes
+                    if not ax.get_visible():
+                        continue
+                    x0, x1 = sorted(map(float, ax.get_xlim()))
+                    y0, y1 = sorted(map(float, ax.get_ylim()))
+                    xs = [x0, 0.5 * (x0 + x1), x1, x0, x1, x0, 0.5 * (x0 + x1), x1]
+                    ys = [y0, y0, y0, 0.5 * (y0 + y1), 0.5 * (y0 + y1), y1, y1, y1]
+                    src_crs = CRS.from_user_input(panel.crs)
+                    if src_crs.to_epsg() in (4326, 4490):
+                        lons, lats = xs, ys
+                    else:
+                        tf = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
+                        lons, lats = tf.transform(xs, ys)
+                    finite_lons = [v for v in lons if math.isfinite(v)]
+                    finite_lats = [v for v in lats if math.isfinite(v)]
+                    if finite_lons and finite_lats:
+                        lon_min, lon_max = min(finite_lons), max(finite_lons)
+                        lat_min, lat_max = min(finite_lats), max(finite_lats)
+                        if (
+                            lon_min <= 78.0 and lon_max >= 130.0
+                            and lat_min <= 22.0 and lat_max >= 48.0
+                            and (lon_max - lon_min) <= 95.0 and (lat_max - lat_min) <= 65.0
+                        ):
+                            china_missing_inset_axes.append(panel.name)
+            except Exception:
+                pass
+
     clipped_texts = list(dict.fromkeys(clipped_texts))[:10]
     frame_overflow_texts = list(dict.fromkeys(frame_overflow_texts))[:10]
     return {
@@ -515,6 +554,8 @@ def _compute_cartography_hygiene_diagnostics(
         "duplicate_tick_axes": duplicate_tick_axes[:5],
         "bare_axis_label_warning": bool(bare_axis_label_axes),
         "bare_axis_label_axes": bare_axis_label_axes[:5],
+        "china_standard_map_warning": bool(china_missing_inset_axes),
+        "china_standard_map_axes": china_missing_inset_axes[:5],
         "clipped_text_warning": bool(clipped_texts),
         "clipped_texts": clipped_texts,
         "frame_overflow_warning": bool(frame_overflow_texts),

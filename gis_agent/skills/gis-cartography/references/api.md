@@ -6,6 +6,9 @@
 
 ```python
 from gis_agent.integrations.plotting.runtime import MapPanel, configure_plotting, export_figure
+from gis_agent.integrations.plotting.china import (
+    CHINA_ALBERS_PROJ, load_china_standard_basemap, plot_china_standard_map,
+)
 from gis_agent.integrations.plotting.primitives import (
     GEO_COLORS, apply_publication_theme, get_scientific_cmap, build_perceptual_norm,
     get_palette, list_palettes, get_bivariate_palette, build_bivariate_palette,
@@ -22,6 +25,9 @@ Call `configure_plotting()` BEFORE `apply_publication_theme()` and BEFORE import
 
 ```python
 from gis_agent.integrations.plotting.runtime import MapPanel, configure_plotting, export_figure
+from gis_agent.integrations.plotting.china import (
+    CHINA_ALBERS_PROJ, load_china_standard_basemap, plot_china_standard_map,
+)
 from gis_agent.integrations.plotting.primitives import (
     GEO_COLORS, apply_publication_theme, add_graticule_frame,
     add_scalebar_and_north, add_clean_legend,
@@ -59,6 +65,7 @@ finally:
 - `add_flow_arcs(ax, flows, *, value_col=None, directed=False, symmetric=True, bend_outward=True, curvature=0.18, length_scale=True, breaks=None, n_classes=4, lw_range=(0.7,4.2), alpha_range=(0.38,0.94), gamma=0.75, cmap="carto_oryel", colors=None, halo=True, top_n=None, min_value=None, zorder=5.0)` — `flows`: `GeoDataFrame` or `(x0,y0,x1,y1)` DataFrame/`(x0,y0,x1,y1,v)`; returns `{"count","breaks","colors","linewidths","legend_items"}`.
 - `add_size_legend(ax, items, *, layout="nested"|"vertical"|"horizontal", title=None, line_items=None, line_title=None, facecolor="#d96f32", edgecolor="#ffffff", alpha=0.85, frameon=True, title_align="center", fontsize=None, title_fontsize=None)` — `items`: `[(lbl, s_pt2)]` or `[{"label","size","color","edgecolor","alpha"}]` (`scatter s`); stacks cleanly with `line_items=flow["legend_items"]` inside one card.
 - `attach_marginal_profiles`, `find_quiet_corner`, `rank_quiet_corners`, `add_bivariate_legend`, `bivariate_classify`.
+- `load_china_standard_basemap(crs=CHINA_ALBERS_PROJ, custom_path=None)` & `plot_china_standard_map(ax, *, data_gdf=None, column=None, cmap=None, norm=None, add_scs_inset=True, inset_bounds=(0.78,0.02,0.20,0.28), crs=CHINA_ALBERS_PROJ, approval_note=None, render_overlay=None)` — bundled CGCS2000 standard China boundaries + ten-dash line + synchronized South China Sea inset.
 
 ## Further details
 

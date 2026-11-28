@@ -1532,3 +1532,67 @@ def test_v906_network_four_piece_suite() -> None:
     assert tg_dead.has_edge(("edge", ("xy", 10.0, 0.0, ()), ("xy", 20.0, 0.0, ()), ("spur", "f")), ("edge", ("xy", 20.0, 0.0, ()), ("xy", 10.0, 0.0, ()), ("spur", "b")))
 
 
+def test_v92_china_standard_basemap_and_plot_primitive(tmp_path: Path) -> None:
+    import matplotlib.pyplot as plt
+    from gis_agent.integrations.plotting import (
+        CHINA_ALBERS_PROJ,
+        MapPanel,
+        configure_plotting,
+        export_figure,
+        get_scientific_cmap,
+        load_china_standard_basemap,
+        plot_china_standard_map,
+    )
+
+    configure_plotting(font_style="sans")
+    basemap = load_china_standard_basemap()
+    assert len(basemap["provinces"]) == 34
+    assert len(basemap["ten_dash_line"]) == 1
+    assert len(basemap["national_boundary"]) == 1
+
+    data = basemap["provinces"].copy()
+    data["val"] = [float(i + 1) for i in range(len(data))]
+    fig, ax = plt.subplots(figsize=(8.0, 6.0))
+    try:
+        rendered = plot_china_standard_map(
+            ax,
+            data_gdf=data,
+            column="val",
+            cmap=get_scientific_cmap("sequential", "nordic_snow"),
+        )
+        assert rendered["inset_ax"] is not None
+        assert rendered["inset_ax"].get_gid() == "south_china_sea_inset"
+        res = export_figure(
+            fig,
+            tmp_path / "china_ok",
+            formats=("png",),
+            map_panels=(MapPanel("main", ax, CHINA_ALBERS_PROJ),),
+        )
+    finally:
+        plt.close(fig)
+    assert res["layout_diagnostics"]["hygiene"]["china_standard_map_warning"] is False
+
+
+def test_v92_china_full_extent_without_scs_inset_triggers_warning(tmp_path: Path) -> None:
+    import matplotlib.pyplot as plt
+    from gis_agent.integrations.plotting import MapPanel, configure_plotting, export_figure
+
+    configure_plotting(font_style="sans")
+    fig, ax = plt.subplots(figsize=(7.0, 5.0))
+    try:
+        ax.plot([73.0, 136.0], [18.0, 54.0])
+        ax.set_xlim(73.0, 136.0)
+        ax.set_ylim(18.0, 54.0)
+        res = export_figure(
+            fig,
+            tmp_path / "china_bad",
+            formats=("png",),
+            map_panels=(MapPanel("main", ax, "EPSG:4326"),),
+        )
+    finally:
+        plt.close(fig)
+    assert res["layout_diagnostics"]["hygiene"]["china_standard_map_warning"] is True
+    assert res["layout_diagnostics"]["hygiene"]["china_standard_map_axes"] == ["main"]
+
+
+
