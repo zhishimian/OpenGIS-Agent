@@ -43,7 +43,7 @@ try:
     gdf.plot(ax=ax, facecolor=GEO_COLORS["land_warm"], edgecolor=GEO_COLORS["border_study"], linewidth=0.9, zorder=8)
     ax.set_aspect("equal")
     add_graticule_frame(ax, crs=gdf.crs, style="ticks_only", dms=True)
-    add_scalebar_and_north(ax, crs_units="metre", loc="lower right", north_loc="upper left", north_style="compass_star")
+    add_scalebar_and_north(ax, crs_units="metre", loc="auto", north_loc="auto", north_style="compass_star")
     ax_leg = fig.add_axes([0.78, 0.14, 0.20, 0.42]); ax_leg.set_axis_off()
     add_clean_legend(ax_leg, [("Study Area", GEO_COLORS["land_warm"])], title="Legend", loc="center", frameon=True, title_align="center")
     res = export_figure(fig, output_dir, formats=("png", "svg"), inputs=(source,), map_panels=(MapPanel("main", ax, gdf.crs.to_string()),))
@@ -58,7 +58,8 @@ finally:
 - `get_scientific_cmap(kind="sequential", name=None, *, n=None, reverse=False, zero_anchored=False)` + `build_perceptual_norm(vals)` + `add_continuous_colorbar(..., zero_label=None)`.
 - `apply_publication_theme(style="light_geo", font_scale=1.0, *, fig_width=None)` -> `{"fonts": {"T1":16,"T2":14,"T3":12,"T4":10}, "colors": ...}`.
 - `add_graticule_frame(ax, *, crs=None, style="ticks_only", dms=True, step_deg=None)` — projected & `GeoAxes` integer DMS ticks.
-- `add_scalebar_and_north(ax, *, crs_units="metre", loc="lower left", north=True, north_loc="upper left", scale_style="cartographic", north_style="compass_star")`
+- `add_scalebar_and_north(ax, *, crs_units="metre", loc="auto"|"lower left", north=True, north_loc="auto"|"upper left", scale_style="cartographic", north_style="compass_star")`
+- `compute_ax_ink_mask(ax, *, ignore_gids=None)` & `rank_quiet_corners` / `find_quiet_corner` — pixel ink-density & geometry scoring for collision-free placement of chrome and callouts.
 - `add_locator_inset(fig_or_ax, bounds, *, shape="rect"|"circle", projection=None, facecolor=GEO_COLORS["ocean_soft"])`
 - `add_clean_legend(ax, items, *, title=None, loc="lower left", ncol=1, frameon=False, title_align="center")` — `items`: `[(lbl,hex)]` or `[{"label","color","kind":"patch"|"line"|"marker"}]`.
 - `add_leader_callouts(ax, items, *, use_adjust_text=True, fontsize=None, zorder=15)` — `[{"label","xy":(x,y),"xytext":(tx,ty)}]` halo-only leaders.

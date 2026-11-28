@@ -543,8 +543,76 @@ def _compute_cartography_hygiene_diagnostics(
             except Exception:
                 pass
 
+    # 7. 装饰物压盖底图 / 互相撞车检测（scalebar / north_arrow / approval_note）
+    chrome_overlaps: list[str] = []
+    if map_panels:
+        try:
+            from matplotlib.transforms import Bbox
+            from gis_agent.integrations.plotting.primitives import compute_ax_ink_mask
+
+            ignore_chrome = {"scalebar", "north_arrow", "approval_note", "graticule_labels", "graticule_ticks"}
+            for panel in map_panels:
+                ax = panel.axes
+                if not ax.get_visible():
+                    continue
+                base_mask = compute_ax_ink_mask(ax, ignore_gids=ignore_chrome)
+                mh, mw = base_mask.shape
+                if mh <= 1 or mw <= 1:
+                    continue
+                renderer = figure.canvas.get_renderer()
+                H_fig = int(np.asarray(figure.canvas.buffer_rgba()).shape[0])
+                ax_bb = ax.get_window_extent(renderer)
+                ax_c0 = int(round(ax_bb.x0)) + 3
+                ax_r0 = H_fig - int(round(ax_bb.y1)) + 3
+
+                def _union_gid_bbox(gid_name: str):
+                    bbs = []
+                    for obj in ax.get_children():
+                        if getattr(obj, "get_gid", lambda: None)() == gid_name and obj.get_visible():
+                            try:
+                                obb = obj.get_window_extent(renderer)
+                                if obb is not None and obb.width > 0 and obb.height > 0:
+                                    bbs.append(obb)
+                            except Exception:
+                                pass
+                    return Bbox.union(bbs) if bbs else None
+
+                def _mask_overlap(bb_obj) -> float:
+                    ic0 = int(np.clip(math.floor(bb_obj.x0) - ax_c0, 0, mw))
+                    ic1 = int(np.clip(math.ceil(bb_obj.x1) - ax_c0, 0, mw))
+                    ir0 = int(np.clip((H_fig - math.ceil(bb_obj.y1)) - ax_r0, 0, mh))
+                    ir1 = int(np.clip((H_fig - math.floor(bb_obj.y0)) - ax_r0, 0, mh))
+                    if ir1 <= ir0 or ic1 <= ic0:
+                        return 0.0
+                    return float(np.mean(base_mask[ir0:ir1, ic0:ic1]))
+
+                sb_bb = _union_gid_bbox("scalebar")
+                na_bb = _union_gid_bbox("north_arrow")
+                note_bb = _union_gid_bbox("approval_note")
+                if sb_bb is not None:
+                    sb_ratio = _mask_overlap(sb_bb)
+                    if sb_ratio > 0.06:
+                        chrome_overlaps.append(f"{panel.name}: scalebar overlaps map content ({sb_ratio:.0%})")
+                if na_bb is not None:
+                    na_ratio = _mask_overlap(na_bb)
+                    if na_ratio > 0.12:
+                        chrome_overlaps.append(f"{panel.name}: north_arrow overlaps map content ({na_ratio:.0%})")
+                if sb_bb is not None:
+                    for other_name, other_bb in (("north_arrow", na_bb), ("approval_note", note_bb)):
+                        if other_bb is None or not sb_bb.overlaps(other_bb):
+                            continue
+                        inter = Bbox.intersection(sb_bb, other_bb)
+                        if inter is None:
+                            continue
+                        min_area = max(min(sb_bb.width * sb_bb.height, other_bb.width * other_bb.height), 1.0)
+                        if (inter.width * inter.height) / min_area > 0.05:
+                            chrome_overlaps.append(f"{panel.name}: scalebar overlaps {other_name}")
+        except Exception:
+            pass
+
     clipped_texts = list(dict.fromkeys(clipped_texts))[:10]
     frame_overflow_texts = list(dict.fromkeys(frame_overflow_texts))[:10]
+    chrome_overlaps = list(dict.fromkeys(chrome_overlaps))[:5]
     return {
         "subtitle_detected_warning": bool(subtitle_candidates),
         "subtitle_candidates": subtitle_candidates[:5],
@@ -556,6 +624,8 @@ def _compute_cartography_hygiene_diagnostics(
         "bare_axis_label_axes": bare_axis_label_axes[:5],
         "china_standard_map_warning": bool(china_missing_inset_axes),
         "china_standard_map_axes": china_missing_inset_axes[:5],
+        "chrome_overlap_warning": bool(chrome_overlaps),
+        "chrome_overlaps": chrome_overlaps,
         "clipped_text_warning": bool(clipped_texts),
         "clipped_texts": clipped_texts,
         "frame_overflow_warning": bool(frame_overflow_texts),

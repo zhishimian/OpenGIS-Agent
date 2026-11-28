@@ -981,6 +981,19 @@ def add_scalebar_and_north(
     bar_metres = _nice_scale_length(dx_metres * frac_len)
     frac_len = max(0.08, min(0.35, bar_metres / max(dx_metres, 1e-9)))
 
+    resolved_loc = loc.strip().lower()
+    if resolved_loc == "auto":
+        try:
+            ranked_sb = rank_quiet_corners(
+                ax,
+                candidates=("lower left", "lower right", "lower center", "upper left", "upper right"),
+                box_frac=(max(0.24, frac_len + 0.08), 0.14),
+            )
+            ranked_sb.sort(key=lambda item: item[1] + (0.0 if "lower" in item[0] else 0.005))
+            resolved_loc = ranked_sb[0][0]
+        except Exception:
+            resolved_loc = "lower left"
+
     use_km = bar_metres >= 1000.0
     unit_label = "km" if use_km else "m"
     end_val = bar_metres / 1000.0 if use_km else bar_metres
@@ -1005,7 +1018,7 @@ def add_scalebar_and_north(
             sb = ScaleBar(
                 1.0,
                 units="m",
-                location=loc,
+                location=resolved_loc,
                 color=color,
                 box_alpha=0.0,
                 font_properties={"size": tick_pt},
@@ -1023,7 +1036,7 @@ def add_scalebar_and_north(
             pass
 
     if backend != "matplotlib_scalebar":
-        loc_norm = loc.strip().lower()
+        loc_norm = resolved_loc
         end_label = f"{fmt(end_val)} {unit_label}"
         pad_x_left = max(0.055, 0.035 + (tick_pt * 0.45 / 72.0) / box_w_in)
         pad_x_right = max(0.068, 0.045 + (len(end_label) * tick_pt * 0.36 / 72.0) / box_w_in)
@@ -1105,8 +1118,21 @@ def add_scalebar_and_north(
         scale_artist = scale_parts
 
     north_artists: list[Any] = []
+    resolved_north_loc: str | None = None
     if north:
         nloc = north_loc.strip().lower()
+        if nloc == "auto":
+            try:
+                ranked_na = rank_quiet_corners(
+                    ax,
+                    exclude=(resolved_loc,),
+                    candidates=("upper left", "upper right", "lower left", "lower right"),
+                    box_frac=(0.14, 0.18),
+                )
+                nloc = ranked_na[0][0]
+            except Exception:
+                nloc = "upper left" if resolved_loc != "upper left" else "upper right"
+        resolved_north_loc = nloc
         n_h_frac = (north_pt * 1.25 / 72.0) / box_h_in
         r_n = 0.044
         r_s = 0.028
@@ -1216,6 +1242,8 @@ def add_scalebar_and_north(
         "backend": backend,
         "scale_style": scale_st,
         "north_style": north_st,
+        "scalebar_loc": resolved_loc,
+        "north_loc": resolved_north_loc,
         "scale_artist": scale_artist,
         "north_artists": north_artists,
     }
@@ -1993,6 +2021,68 @@ def _score_vector_occupancy(geoms: Any, wx0: float, wy0: float, wx1: float, wy1:
     return float(min(1.0, max(area_frac + min(line_frac, 1.0), pt_score)))
 
 
+def compute_ax_ink_mask(
+    ax: Axes,
+    *,
+    ignore_gids: set[str] | None = None,
+    pad_px: int = 3,
+    tol: float = 12.0,
+) -> np.ndarray:
+    """Render ax in memory to capture occupied pixels (geometries, labels, and overlapping child/other axes)."""
+    fig = ax.figure
+    if fig is None or fig.canvas is None:
+        return np.zeros((1, 1), dtype=bool)
+
+    hidden: list[Any] = []
+    if ignore_gids:
+        for obj in ax.get_children():
+            gid = getattr(obj, "get_gid", lambda: None)()
+            if gid in ignore_gids and obj.get_visible():
+                obj.set_visible(False)
+                hidden.append(obj)
+        for other_ax in fig.axes:
+            if other_ax is ax:
+                continue
+            if other_ax.get_gid() in ignore_gids and other_ax.get_visible():
+                other_ax.set_visible(False)
+                hidden.append(other_ax)
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        rgba = np.asarray(fig.canvas.buffer_rgba())
+        H, W = rgba.shape[:2]
+        bb = ax.get_window_extent(renderer)
+        r0 = max(0, H - int(round(bb.y1)) + pad_px)
+        r1 = min(H, H - int(round(bb.y0)) - pad_px)
+        c0 = max(0, int(round(bb.x0)) + pad_px)
+        c1 = min(W, int(round(bb.x1)) - pad_px)
+        if r1 <= r0 or c1 <= c0:
+            return np.zeros((1, 1), dtype=bool)
+        crop = rgba[r0:r1, c0:c1, :3].astype(np.float32)
+        bg = np.asarray(mcolors.to_rgb(ax.get_facecolor()), dtype=np.float32) * 255.0
+        mask = np.max(np.abs(crop - bg), axis=-1) > tol
+        mh, mw = mask.shape
+        for other_ax in fig.axes:
+            if other_ax is ax or not other_ax.get_visible():
+                continue
+            if ignore_gids and other_ax.get_gid() in ignore_gids:
+                continue
+            try:
+                obb = other_ax.get_window_extent(renderer)
+            except Exception:
+                continue
+            or0 = max(0, (H - int(round(obb.y1))) - r0)
+            or1 = min(mh, (H - int(round(obb.y0))) - r0)
+            oc0 = max(0, int(round(obb.x0)) - c0)
+            oc1 = min(mw, int(round(obb.x1)) - c0)
+            if or1 > or0 and oc1 > oc0:
+                mask[or0:or1, oc0:oc1] = True
+        return mask
+    finally:
+        for obj in hidden:
+            obj.set_visible(True)
+
+
 def rank_quiet_corners(
     ax: Axes,
     geoms: Any = None,
@@ -2016,7 +2106,13 @@ def rank_quiet_corners(
         if r_mask.ndim != 2 or r_mask.size == 0:
             r_mask = None
 
+    ink_mask: np.ndarray | None = None
+    if r_mask is None and geoms is None:
+        ink_mask = compute_ax_ink_mask(ax)
+
     ranked: list[tuple[str, float]] = []
+    span_x = max(x_hi - x_lo, 1e-12)
+    span_y = max(y_hi - y_lo, 1e-12)
     for raw_corner in candidates:
         corner = str(raw_corner).strip().lower()
         if corner in excluded:
@@ -2046,23 +2142,20 @@ def rank_quiet_corners(
         if geoms is not None:
             scores.append(_score_vector_occupancy(geoms, wx0, wy0, wx1, wy1))
 
-        if not scores:
-            win_area = max((wx1 - wx0) * (wy1 - wy0), 1e-12)
-            fallback_occ = 0.0
-            for artist in (*ax.collections, *ax.patches):
-                if not artist.get_visible():
-                    continue
-                try:
-                    bb = artist.get_datalim(ax.transData)
-                except Exception:
-                    continue
-                ix0, iy0 = max(wx0, float(bb.x0)), max(wy0, float(bb.y0))
-                ix1, iy1 = min(wx1, float(bb.x1)), min(wy1, float(bb.y1))
-                if ix1 > ix0 and iy1 > iy0:
-                    fallback_occ += ((ix1 - ix0) * (iy1 - iy0)) / win_area
-            scores.append(min(1.0, fallback_occ))
+        if not scores and ink_mask is not None:
+            mh, mw = ink_mask.shape
+            u0, u1 = (wx0 - x_lo) / span_x, (wx1 - x_lo) / span_x
+            v0, v1 = (wy0 - y_lo) / span_y, (wy1 - y_lo) / span_y
+            ic0 = int(np.clip(math.floor(u0 * mw), 0, mw))
+            ic1 = int(np.clip(math.ceil(u1 * mw), 0, mw))
+            ir0 = int(np.clip(math.floor((1.0 - v1) * mh), 0, mh))
+            ir1 = int(np.clip(math.ceil((1.0 - v0) * mh), 0, mh))
+            if ir1 > ir0 and ic1 > ic0:
+                scores.append(float(np.mean(ink_mask[ir0:ir1, ic0:ic1])))
+            else:
+                scores.append(0.0)
 
-        ranked.append((corner, round(float(max(scores)), 6)))
+        ranked.append((corner, round(float(max(scores)) if scores else 0.0, 6)))
 
     ranked.sort(key=lambda item: item[1])
     return ranked

@@ -1595,4 +1595,49 @@ def test_v92_china_full_extent_without_scs_inset_triggers_warning(tmp_path: Path
     assert res["layout_diagnostics"]["hygiene"]["china_standard_map_axes"] == ["main"]
 
 
+def test_v92_auto_scalebar_avoids_hainan_and_overlap_guard(tmp_path: Path) -> None:
+    import matplotlib.pyplot as plt
+    from gis_agent.integrations.plotting import (
+        CHINA_ALBERS_PROJ,
+        MapPanel,
+        add_scalebar_and_north,
+        configure_plotting,
+        export_figure,
+        plot_china_standard_map,
+    )
+
+    configure_plotting(font_style="sans")
+    # 1) loc="auto", north_loc="auto" 自动避开海南岛与南海小框，零压盖
+    fig1, ax1 = plt.subplots(figsize=(8.0, 6.0))
+    try:
+        plot_china_standard_map(ax1, approval_note="审图标准参考底图")
+        sb_meta = add_scalebar_and_north(ax1, crs_units="metre", loc="auto", north_loc="auto")
+        res1 = export_figure(
+            fig1,
+            tmp_path / "auto_clean",
+            formats=("png",),
+            map_panels=(MapPanel("main", ax1, CHINA_ALBERS_PROJ),),
+        )
+    finally:
+        plt.close(fig1)
+    assert sb_meta["scalebar_loc"] == "lower left", sb_meta
+    assert res1["layout_diagnostics"]["hygiene"]["chrome_overlap_warning"] is False, res1["layout_diagnostics"]["hygiene"]
+
+    # 2) 强制 loc="lower center" 切穿海南岛 -> chrome_overlap_warning 自动告警
+    fig2, ax2 = plt.subplots(figsize=(8.0, 6.0))
+    try:
+        plot_china_standard_map(ax2)
+        add_scalebar_and_north(ax2, crs_units="metre", loc="lower center", north_loc="upper left")
+        res2 = export_figure(
+            fig2,
+            tmp_path / "cut_hainan",
+            formats=("png",),
+            map_panels=(MapPanel("main", ax2, CHINA_ALBERS_PROJ),),
+        )
+    finally:
+        plt.close(fig2)
+    assert res2["layout_diagnostics"]["hygiene"]["chrome_overlap_warning"] is True
+    assert any("scalebar overlaps map content" in msg for msg in res2["layout_diagnostics"]["hygiene"]["chrome_overlaps"])
+
+
 

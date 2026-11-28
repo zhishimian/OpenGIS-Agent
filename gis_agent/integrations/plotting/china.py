@@ -250,28 +250,53 @@ def plot_china_standard_map(
         inset_ax.set_xlim(ix0, ix1)
         inset_ax.set_ylim(iy0, iy1)
         inset_ax.set_aspect("equal", adjustable="box")
+
+        from gis_agent.integrations.plotting.primitives import rank_quiet_corners
+
+        inset_lbl_coords = {
+            "lower left": (0.05, 0.04, "left", "bottom"),
+            "lower right": (0.95, 0.04, "right", "bottom"),
+            "upper right": (0.95, 0.96, "right", "top"),
+        }
+        best_inset_corner = rank_quiet_corners(
+            inset_ax, candidates=("lower left", "upper right", "lower right"), box_frac=(0.55, 0.16),
+        )[0][0]
+        lx, ly, lha, lva = inset_lbl_coords[best_inset_corner]
         inset_ax.text(
-            0.06,
-            0.04,
+            lx,
+            ly,
             "南海诸岛",
             transform=inset_ax.transAxes,
             fontsize=10,
             color="#2b2b2b",
-            ha="left",
-            va="bottom",
+            ha=lha,
+            va=lva,
+            bbox={"facecolor": "#ffffff", "alpha": 0.90, "edgecolor": "none", "pad": 1.2},
             zorder=10,
         )
 
     if approval_note:
+        from gis_agent.integrations.plotting.primitives import rank_quiet_corners
+
+        note_coords = {
+            "upper right": (0.985, 0.98, "right", "top"),
+            "lower left": (0.015, 0.015, "left", "bottom"),
+            "upper left": (0.015, 0.98, "left", "top"),
+        }
+        best_note_corner = rank_quiet_corners(
+            ax, candidates=("upper right", "upper left", "lower left"), box_frac=(0.18, 0.06),
+        )[0][0]
+        nx, ny, nha, nva = note_coords[best_note_corner]
         ax.text(
-            0.015,
-            0.015,
+            nx,
+            ny,
             approval_note,
             transform=ax.transAxes,
             fontsize=10,
             color="#555555",
-            ha="left",
-            va="bottom",
+            ha=nha,
+            va=nva,
+            gid="approval_note",
             zorder=10,
         )
 
